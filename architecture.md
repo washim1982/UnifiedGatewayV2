@@ -156,9 +156,12 @@ flowchart TD
 
 | Security Control Requirement | Implementation Status | Evidence / Verification Location |
 | :--- | :--- | :--- |
-| **Admin-Level Pre-Execution Guardrails** | **PASSED** | [`GuardrailService.cs`](file:///c:/Users/wasim/workspace/Projects/Unified-LLM-Gateway/Services/GuardrailService.cs), [`ModelRouter.cs`](file:///c:/Users/wasim/workspace/Projects/Unified-LLM-Gateway/Services/ModelRouter.cs) |
-| **PCI Credit Card Luhn Validation** | **PASSED** | Validated in [`GuardrailServiceTests.cs`](file:///c:/Users/wasim/workspace/Projects/Unified-LLM-Gateway/UnifiedGateway.Tests/GuardrailServiceTests.cs). |
+| **Admin-Level Pre-Execution Guardrails** | **PASSED** | [`GuardrailService.cs`](Services/GuardrailService.cs), [`ModelRouter.cs`](Services/ModelRouter.cs) |
+| **PCI Credit Card Luhn Validation** | **PASSED** | Validated in [`GuardrailServiceTests.cs`](UnifiedGatewayV2.Tests/GuardrailServiceTests.cs). |
 | **PII & Secrets Redaction** | **PASSED** | Inline sanitization verified for SSN, Email, Phone, AWS Keys, and JWTs. |
 | **Prompt Injection & Jailbreak Defense** | **PASSED** | System override and DAN patterns detected and quarantined. |
-| **Zero Plaintext Secrets / STS Isolation** | **PASSED** | [`STSService.cs`](file:///c:/Users/wasim/workspace/Projects/Unified-LLM-Gateway/Services/STSService.cs), [`AwsCredentialBackgroundService.cs`](file:///c:/Users/wasim/workspace/Projects/Unified-LLM-Gateway/Services/AwsCredentialBackgroundService.cs) |
-| **Automated Unit & Integration Test Suite** | **PASSED** | 17/17 tests passing in [`UnifiedGateway.Tests`](file:///c:/Users/wasim/workspace/Projects/Unified-LLM-Gateway/UnifiedGateway.Tests). |
+| **Zero Plaintext Secrets / STS Isolation** | **PASSED** | [`STSService.cs`](Services/STSService.cs), [`AwsCredentialBackgroundService.cs`](Services/AwsCredentialBackgroundService.cs) |
+| **Egress (Response) Guardrails** | **PASSED** | Model output scanned for leaked PCI/PII/secrets; fails closed. [`GuardrailService.cs`](Services/GuardrailService.cs), [`ModelRouter.cs`](Services/ModelRouter.cs) |
+| **Rate Limiting & Abuse Clamps** | **PASSED** | Per-caller limiter, input/token/body caps. [`Program.cs`](Program.cs) |
+| **Persistent Audit Trail** | **PASSED** | Append-only JSONL, survives restart. [`ApplicationRegistryService.cs`](Services/ApplicationRegistryService.cs) |
+| **Automated Unit & Integration Test Suite** | **PASSED** | 40/40 tests passing in [`UnifiedGatewayV2.Tests`](UnifiedGatewayV2.Tests). |

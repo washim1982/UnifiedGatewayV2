@@ -4,7 +4,7 @@ using UnifiedGateway.Models;
 using UnifiedGateway.Services;
 using Xunit;
 
-namespace UnifiedGateway.Tests;
+namespace UnifiedGatewayV2.Tests;
 
 public class GuardrailServiceTests
 {

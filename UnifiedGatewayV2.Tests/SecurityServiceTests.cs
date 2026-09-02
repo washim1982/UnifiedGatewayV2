@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using UnifiedGateway.Services;
 using Xunit;
 
-namespace UnifiedGateway.Tests;
+namespace UnifiedGatewayV2.Tests;
 
 public class SecurityServiceTests
 {

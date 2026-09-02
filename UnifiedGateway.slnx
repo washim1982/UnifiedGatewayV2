@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="UnifiedGatewayV2.csproj" />
-  <Project Path="UnifiedGateway.Tests/UnifiedGateway.Tests.csproj" />
-</Solution>

@@ -11,10 +11,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="UnifiedGateway.Tests\**" />
-    <Content Remove="UnifiedGateway.Tests\**" />
-    <EmbeddedResource Remove="UnifiedGateway.Tests\**" />
-    <None Remove="UnifiedGateway.Tests\**" />
+    <Compile Remove="UnifiedGatewayV2.Tests\**" />
+    <Content Remove="UnifiedGatewayV2.Tests\**" />
+    <EmbeddedResource Remove="UnifiedGatewayV2.Tests\**" />
+    <None Remove="UnifiedGatewayV2.Tests\**" />
   </ItemGroup>
 
   <ItemGroup>

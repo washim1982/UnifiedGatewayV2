@@ -178,9 +178,18 @@ if (app.Environment.IsDevelopment() || app.Environment.IsStaging() || app.Enviro
     });
 }
 
-// Serve embedded dashboard
+// Serve embedded dashboard.
+// Assets must always revalidate: the dashboard is an internal admin UI, and aggressive browser
+// caching otherwise serves a stale stylesheet/script after a redeploy. ETags are still emitted,
+// so an unchanged file costs only a cheap 304.
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        ctx.Context.Response.Headers.CacheControl = "no-cache, must-revalidate";
+    }
+});
 
 // 9. Map Minimal API Endpoints
 app.MapGatewayEndpoints();
