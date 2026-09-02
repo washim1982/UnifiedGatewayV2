@@ -1,0 +1,23 @@
+using UnifiedGateway.Models;
+
+namespace UnifiedGateway.Services;
+
+public interface IApplicationRegistryService
+{
+    Task<AppConfig?> GetAppAsync(string appId, CancellationToken cancellationToken = default);
+    Task<List<AppConfig>> GetAllAppsAsync(CancellationToken cancellationToken = default);
+    Task<CreateAppResponse> CreateAppAsync(CreateAppRequest request, CancellationToken cancellationToken = default);
+    Task<AppConfig?> UpdateAppAsync(string appId, UpdateAppRequest request, CancellationToken cancellationToken = default);
+    Task<bool> DeleteAppAsync(string appId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Rotates an application's long-term API key. The previous key is invalidated immediately.
+    /// Returns the new plaintext key exactly once, or null if the application does not exist.
+    /// </summary>
+    Task<string?> RotateApiKeyAsync(string appId, CancellationToken cancellationToken = default);
+    Task<(bool isValid, AppConfig? app)> AuthenticateAppAsync(string appId, string apiKey, CancellationToken cancellationToken = default);
+    Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(string? appId, string apiKey, int durationSeconds = 3600, string scope = "invoke", string? callerId = null, CancellationToken cancellationToken = default);
+    Task<AppStsTokenResponse> MintStsTokenDirectAsync(string appId, int durationSeconds = 3600, string scope = "invoke", bool isAdmin = false, string? callerId = null, CancellationToken cancellationToken = default);
+    Task RecordMetricAsync(RequestLogEntry log, CancellationToken cancellationToken = default);
+    Task<GatewayMetricsSummary> GetMetricsSummaryAsync(CancellationToken cancellationToken = default);
+}
