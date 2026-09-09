@@ -4,6 +4,7 @@ using System.Text.Json;
 using Amazon;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
+using Amazon.Runtime;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using GatewayTokenUsage = UnifiedGateway.Models.TokenUsage;
@@ -14,6 +15,8 @@ public class BedrockService : IBedrockService
 {
     private readonly ISTSService _stsService;
     private readonly GatewayOptions _options;
+    private readonly CloudOptions _cloudOptions;
+    private readonly AmazonBedrockRuntimeConfig _bedrockConfig;
     private readonly ILogger<BedrockService> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -25,11 +28,35 @@ public class BedrockService : IBedrockService
     public BedrockService(
         ISTSService stsService,
         IOptions<GatewayOptions> options,
+        IOptions<CloudOptions> cloudOptions,
+        AmazonBedrockRuntimeConfig bedrockConfig,
         ILogger<BedrockService> logger)
     {
         _stsService = stsService;
         _options = options.Value;
+        _cloudOptions = cloudOptions.Value;
+        _bedrockConfig = bedrockConfig;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Builds the Bedrock client for the bound environment.
+    ///
+    /// The AWS simulator implements the real Bedrock Runtime contract
+    /// (POST /model/{modelId}/invoke), so TEST differs from PROD only by the ServiceURL on
+    /// the injected config: no branch in the invocation path, no second code path to keep
+    /// in step. Credentials differ because the simulator does not verify SigV4 on this route.
+    /// </summary>
+    private async Task<AmazonBedrockRuntimeClient> CreateClientAsync(CancellationToken cancellationToken)
+    {
+        if (_cloudOptions.Provider == CloudProviderMode.Simulator)
+        {
+            var placeholder = new BasicAWSCredentials("SIMULATED_KEY", "SIMULATED_SECRET");
+            return new AmazonBedrockRuntimeClient(placeholder, _bedrockConfig);
+        }
+
+        var credentials = await _stsService.GetCredentialsAsync(cancellationToken);
+        return new AmazonBedrockRuntimeClient(credentials, _bedrockConfig);
     }
 
     public async Task<UniversalResponse> InvokeModelAsync(UniversalRequest request, CancellationToken cancellationToken = default)
@@ -42,9 +69,7 @@ public class BedrockService : IBedrockService
 
         try
         {
-            var credentials = await _stsService.GetCredentialsAsync(cancellationToken);
-            var region = RegionEndpoint.GetBySystemName(_options.Aws.Region);
-            using var client = new AmazonBedrockRuntimeClient(credentials, region);
+            using var client = await CreateClientAsync(cancellationToken);
 
             var (payloadBytes, contentType) = BuildRequestBody(modelId, request);
 

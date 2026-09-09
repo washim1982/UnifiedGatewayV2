@@ -8,8 +8,44 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    /* The overlay carries an inline display:flex, which outranks the user-agent
+       [hidden] { display: none } rule. Restore it so toggling `hidden` works. */
+    #okta-login[hidden], #okta-session[hidden], [data-requires-admin][hidden] {
+      display: none !important;
+    }
+  </style>
 </head>
 <body>
+  <div id="okta-login" style="position:fixed;inset:0;z-index:9999;background:#0b1017;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,Segoe UI,sans-serif;">
+    <form id="okta-login-form" style="background:#151c26;border:1px solid #26303d;border-radius:10px;padding:32px;width:min(400px,92vw);display:flex;flex-direction:column;gap:14px;box-shadow:0 24px 60px rgba(0,0,0,.5);">
+      <div style="display:flex;flex-direction:column;gap:4px;">
+        <span style="font:600 11px/1 ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;color:#5b9dd9;">Okta &middot; simulated</span>
+        <h2 style="margin:0;font:600 21px/1.2 system-ui;color:#e6ecf2;">Sign in to Unified Gateway</h2>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:5px;font:500 12px/1 system-ui;color:#93a3b4;">Username
+        <input id="okta-username" type="email" autocomplete="username" required
+               style="padding:10px 12px;border-radius:6px;border:1px solid #2d3948;background:#0e141c;color:#e6ecf2;font:14px system-ui;">
+      </label>
+      <label style="display:flex;flex-direction:column;gap:5px;font:500 12px/1 system-ui;color:#93a3b4;">Password
+        <input id="okta-password" type="password" autocomplete="current-password" required
+               style="padding:10px 12px;border-radius:6px;border:1px solid #2d3948;background:#0e141c;color:#e6ecf2;font:14px system-ui;">
+      </label>
+      <div id="okta-login-error" hidden style="color:#f2a0a0;font:13px/1.4 system-ui;"></div>
+      <button type="submit" style="margin-top:4px;padding:11px;border:0;border-radius:6px;background:#2f6f9f;color:#fff;font:600 14px system-ui;cursor:pointer;">Sign in</button>
+      <div style="border-top:1px solid #26303d;padding-top:12px;font:12px/1.7 ui-monospace,monospace;color:#7d8b9b;">
+        <div style="color:#93a3b4;margin-bottom:4px;">Directory (local simulator):</div>
+        wasim.khan@gmail.com &middot; Admin@12345 &mdash; Admins<br>
+        dev-user@gmail.com &middot; Dev@12345 &mdash; Developers
+      </div>
+    </form>
+  </div>
+  <div id="okta-session" hidden style="position:fixed;top:0;right:0;z-index:9998;padding:6px 14px;background:#151c26;border:0 0 1px 1px solid #26303d;border-radius:0 0 0 8px;font:12px system-ui;color:#93a3b4;display:flex;gap:10px;align-items:center;">
+    <span id="okta-session-user"></span>
+    <button id="okta-signout" style="border:1px solid #2d3948;background:transparent;color:#93a3b4;border-radius:4px;padding:3px 9px;font:12px system-ui;cursor:pointer;">Sign out</button>
+  </div>
+  <div id="auth-banner" hidden style="background:#7f1d1d;color:#fee2e2;padding:10px 16px;font:14px system-ui;border-bottom:1px solid #b91c1c;"></div>
   <div class="app-layout">
     <!-- Sidebar Navigation -->
     <aside class="sidebar">
@@ -30,7 +66,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           Applications
         </button>
-        <button class="nav-btn" data-tab="guardrails">
+        <button class="nav-btn" data-tab="guardrails" data-requires-admin>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Guardrails & Safety
         </button>
@@ -38,11 +74,11 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
           API Generator & Test
         </button>
-        <button class="nav-btn" data-tab="universal">
+        <button class="nav-btn" data-tab="universal" data-requires-admin>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
           Universal Router
         </button>
-        <button class="nav-btn" data-tab="telemetry">
+        <button class="nav-btn" data-tab="telemetry" data-requires-admin>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           Telemetry & Metrics
         </button>
@@ -72,7 +108,7 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
             Refresh
           </button>
-          <button class="btn btn-primary" id="btn-open-create-modal">
+          <button class="btn btn-primary" id="btn-open-create-modal" data-requires-admin>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             New Application
           </button>

@@ -230,7 +230,46 @@ public partial class GuardrailService : IGuardrailService
     }
 
     /// <summary>Shared detector pipeline used by both the ingress and egress guardrails.</summary>
+    /// <summary>
+    /// Runs the configured detectors.
+    ///
+    /// Every pattern carries a match timeout so a crafted input cannot pin a CPU core inside
+    /// the engine. A timeout is reported as a violation rather than swallowed: an input the
+    /// scanner could not finish reading has not been shown to be clean, so the guardrail
+    /// fails closed.
+    /// </summary>
     private List<GuardrailViolationDetail> RunDetectors(
+        string text,
+        GuardrailOptions current,
+        bool scanPci,
+        bool scanPii,
+        bool scanSecrets,
+        bool scanInjection)
+    {
+        try
+        {
+            return RunDetectorsCore(text, current, scanPci, scanPii, scanSecrets, scanInjection);
+        }
+        catch (RegexMatchTimeoutException ex)
+        {
+            _logger.LogError(
+                "Guardrail pattern '{Pattern}' timed out after {Timeout}. Treating the input as a violation.",
+                ex.Pattern, ex.MatchTimeout);
+
+            return
+            [
+                new GuardrailViolationDetail
+                {
+                    Category = "Availability",
+                    RuleName = "ScanTimeout",
+                    Description = "The content could not be scanned within the allotted time and was not cleared.",
+                    Severity = "High"
+                }
+            ];
+        }
+    }
+
+    private List<GuardrailViolationDetail> RunDetectorsCore(
         string text,
         GuardrailOptions current,
         bool scanPci,
@@ -278,13 +317,13 @@ public partial class GuardrailService : IGuardrailService
     #region PCI Detection (with Luhn Algorithm Check)
 
     // Regex for potential credit card sequences (13 to 19 digits, with optional hyphens/spaces)
-    [GeneratedRegex(@"\b(?:\d[ -]*?){13,19}\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b(?:\d[ -]*?){13,19}\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex CandidateCreditCardRegex();
 
-    [GeneratedRegex(@"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{4}[0-9]{7}(?:[A-Z0-9]?){0,16}\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{4}[0-9]{7}(?:[A-Z0-9]?){0,16}\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex IbanRegex();
 
-    [GeneratedRegex(@"(?i)\b(?:cvv|cvc|cvv2|cvc2|security code)[:\s]*([0-9]{3,4})\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"(?i)\b(?:cvv|cvc|cvv2|cvc2|security code)[:\s]*([0-9]{3,4})\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex CvvRegex();
 
     private void DetectCreditCards(string input, List<GuardrailViolationDetail> violations)
@@ -292,7 +331,7 @@ public partial class GuardrailService : IGuardrailService
         var matches = CandidateCreditCardRegex().Matches(input);
         foreach (Match match in matches)
         {
-            var rawDigits = Regex.Replace(match.Value, @"[\s-]", "");
+            var rawDigits = Regex.Replace(match.Value, @"[\s-]", "", RegexOptions.None, TimeSpan.FromMilliseconds(250));
             if (rawDigits.Length >= 13 && rawDigits.Length <= 19 && IsValidLuhn(rawDigits))
             {
                 var cardType = IdentifyCardIssuer(rawDigits);
@@ -382,16 +421,16 @@ public partial class GuardrailService : IGuardrailService
 
     #region PII Detection
 
-    [GeneratedRegex(@"\b(?!000|666|9\d{2})\d{3}[- ]?(?!00)\d{2}[- ]?(?!0000)\d{4}\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b(?!000|666|9\d{2})\d{3}[- ]?(?!00)\d{2}[- ]?(?!0000)\d{4}\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex SsnRegex();
 
-    [GeneratedRegex(@"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex EmailRegex();
 
-    [GeneratedRegex(@"\b(?:\+?(\d{1,3}))?[-. (]*(\d{3})[-. )]*(\d{3})[-. ]*(\d{4})\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b(?:\+?(\d{1,3}))?[-. (]*(\d{3})[-. )]*(\d{3})[-. ]*(\d{4})\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex PhoneRegex();
 
-    [GeneratedRegex(@"\b[A-PR-WYa-pr-wy][1-9]\d\s?\d{4}[1-9]\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b[A-PR-WYa-pr-wy][1-9]\d\s?\d{4}[1-9]\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex PassportRegex();
 
     private void DetectSsn(string input, List<GuardrailViolationDetail> violations)
@@ -470,16 +509,16 @@ public partial class GuardrailService : IGuardrailService
 
     #region Secrets & API Keys Detection
 
-    [GeneratedRegex(@"\b(AKIA[0-9A-Z]{16})\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b(AKIA[0-9A-Z]{16})\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex AwsAccessKeyRegex();
 
-    [GeneratedRegex(@"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----", RegexOptions.Compiled)]
+    [GeneratedRegex(@"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex PrivateKeyRegex();
 
-    [GeneratedRegex(@"\beyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\beyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex JwtTokenRegex();
 
-    [GeneratedRegex(@"\b(?:ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|glpat-[a-zA-Z0-9\-_]{20,}|ug_live_[a-f0-9]{64}|sk-[a-zA-Z0-9]{32,})\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b(?:ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|glpat-[a-zA-Z0-9\-_]{20,}|ug_live_[a-f0-9]{64}|sk-[a-zA-Z0-9]{32,})\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex GenericApiKeyRegex();
 
     private void DetectAwsKeys(string input, List<GuardrailViolationDetail> violations)
@@ -562,13 +601,13 @@ public partial class GuardrailService : IGuardrailService
 
     #region Prompt Injection & Jailbreak Detection
 
-    [GeneratedRegex(@"(?i)\b(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:previous|prior|system)\s+(?:instructions|prompts|rules|commands)\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"(?i)\b(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:previous|prior|system)\s+(?:instructions|prompts|rules|commands)\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex SystemOverrideRegex();
 
-    [GeneratedRegex(@"(?i)\b(?:you\s+are\s+now|switch\s+to|act\s+as)\s+(?:DAN|jailbroken|unrestricted|god\s+mode|developer\s+mode|an\s+unfiltered\s+ai)\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"(?i)\b(?:you\s+are\s+now|switch\s+to|act\s+as)\s+(?:DAN|jailbroken|unrestricted|god\s+mode|developer\s+mode|an\s+unfiltered\s+ai)\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex JailbreakDanRegex();
 
-    [GeneratedRegex(@"(?i)\b(?:bypass|disable|turn\s+off)\s+(?:all\s+)?(?:safety|content\s+filter|guardrails?|policy)\b", RegexOptions.Compiled)]
+    [GeneratedRegex(@"(?i)\b(?:bypass|disable|turn\s+off)\s+(?:all\s+)?(?:safety|content\s+filter|guardrails?|policy)\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex BypassSafetyRegex();
 
     private void DetectPromptInjection(string input, List<GuardrailViolationDetail> violations, PromptInjectionOptions options)

@@ -1,5 +1,6 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
+using UnifiedGateway.Auth;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
 
@@ -8,107 +9,133 @@ namespace UnifiedGateway.Endpoints;
 public static class DashboardEndpoints
 {
     /// <summary>
-    /// Verifies the caller presented the Master Admin API key or a valid Admin STS token.
-    /// Used to protect credential-issuing management operations.
+    /// Builds an audit record for a privileged action from the authenticated caller.
     /// </summary>
-    private static bool IsAdminRequest(HttpContext ctx, GatewayOptions options, ISecurityService security)
-    {
-        var presented = ctx.Request.Headers["X-API-Key"].ToString();
-        if (string.IsNullOrWhiteSpace(presented))
+    private static ManagementAuditEntry Audit(
+        HttpContext ctx, string action, string? resource, bool success, string? detail = null) => new()
         {
-            var auth = ctx.Request.Headers.Authorization.ToString();
-            presented = auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? auth[7..].Trim() : auth.Trim();
-        }
-
-        if (string.IsNullOrWhiteSpace(presented)) return false;
-
-        if (presented.StartsWith("ug_sts_", StringComparison.OrdinalIgnoreCase))
-        {
-            var (isValid, payload, _) = security.ValidateAppStsToken(presented);
-            return isValid && payload is { IsAdmin: true };
-        }
-
-        return security.VerifyKey(presented, security.HashKey(options.Security.AdminApiKey));
-    }
+            Action = action,
+            Resource = resource,
+            Actor = ctx.User.FindFirst(GatewayAuth.PrincipalArnClaim)?.Value
+                    ?? ctx.User.FindFirst(ClaimTypes.NameIdentifier)?.Value,
+            AuthType = ctx.User.FindFirst(GatewayAuth.AuthTypeClaim)?.Value,
+            SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+            Success = success,
+            Detail = detail
+        };
 
     public static void MapDashboardEndpoints(this IEndpointRouteBuilder app)
     {
+        // Deny by default for the whole management plane.
+        //
+        // Authorization is applied at the group so a new endpoint added below inherits it
+        // rather than being publicly reachable until somebody remembers to guard it. Every
+        // handler additionally names the IAM action it needs, which is what the environment's
+        // policy engine evaluates.
         var group = app.MapGroup("/api")
-            .WithTags("Dashboard & Management");
+            .WithTags("Dashboard & Management")
+            .RequireAuthorization(GatewayAuth.PlatformAdminPolicy)
+            .RequireRateLimiting("management");
 
-        // List applications
+        #region Applications
+
         group.MapGet("/apps", async (IApplicationRegistryService registry, CancellationToken ct) =>
         {
             var apps = await registry.GetAllAppsAsync(ct);
             return Results.Ok(apps);
         })
-        .WithName("ListApplications");
+        .WithName("ListApplications")
+        .RequireIamAction("ListApplications");
 
-        // Get single application
         group.MapGet("/apps/{appId}", async (string appId, IApplicationRegistryService registry, CancellationToken ct) =>
         {
             var appConfig = await registry.GetAppAsync(appId, ct);
-            return appConfig is not null ? Results.Ok(appConfig) : Results.NotFound(new { error = "Application not found" });
+            return appConfig is not null
+                ? Results.Ok(appConfig)
+                : Results.NotFound(new { error = "Application not found" });
         })
-        .WithName("GetApplication");
+        .WithName("GetApplication")
+        .RequireIamAction("GetApplication");
 
-        // Create new application (generates endpoint and API key)
-        group.MapPost("/apps", async ([FromBody] CreateAppRequest request, IApplicationRegistryService registry, CancellationToken ct) =>
+        group.MapPost("/apps", async (
+            [FromBody] CreateAppRequest request,
+            HttpContext ctx,
+            IApplicationRegistryService registry,
+            CancellationToken ct) =>
         {
             try
             {
                 var created = await registry.CreateAppAsync(request, ct);
+                await registry.RecordManagementActionAsync(
+                    Audit(ctx, "CreateApplication", created.App.AppId, success: true), ct);
+
                 return Results.Created($"/api/apps/{created.App.AppId}", created);
             }
             catch (InvalidOperationException ex)
             {
+                await registry.RecordManagementActionAsync(
+                    Audit(ctx, "CreateApplication", request.AppId, success: false, ex.Message), ct);
+
                 return Results.BadRequest(new { error = ex.Message });
             }
         })
-        .WithName("CreateApplication");
+        .WithName("CreateApplication")
+        .RequireIamAction("CreateApplication");
 
-        // Update application (increments version and updates prompt/config)
-        group.MapPut("/apps/{appId}", async (string appId, [FromBody] UpdateAppRequest request, IApplicationRegistryService registry, CancellationToken ct) =>
-        {
-            var updated = await registry.UpdateAppAsync(appId, request, ct);
-            return updated is not null ? Results.Ok(updated) : Results.NotFound(new { error = "Application not found" });
-        })
-        .WithName("UpdateApplication");
-
-        // Delete application
-        group.MapDelete("/apps/{appId}", async (string appId, IApplicationRegistryService registry, CancellationToken ct) =>
-        {
-            var deleted = await registry.DeleteAppAsync(appId, ct);
-            return deleted ? Results.NoContent() : Results.NotFound(new { error = "Application not found" });
-        })
-        .WithName("DeleteApplication");
-
-        // Rotate an application's long-term API key (invalidates the previous key immediately).
-        // Requires the Master Admin key or an Admin STS token: this mints a credential.
-        group.MapPost("/apps/{appId}/rotate-key", async (
+        group.MapPut("/apps/{appId}", async (
             string appId,
+            [FromBody] UpdateAppRequest request,
             HttpContext ctx,
-            IOptions<GatewayOptions> options,
-            ISecurityService security,
             IApplicationRegistryService registry,
             CancellationToken ct) =>
         {
-            if (!IsAdminRequest(ctx, options.Value, security))
-            {
-                return Results.Json(new
-                {
-                    error = "ADMIN_UNAUTHORIZED",
-                    message = "Key rotation requires the Master Admin API key or an Admin STS token."
-                }, statusCode: StatusCodes.Status401Unauthorized);
-            }
+            var updated = await registry.UpdateAppAsync(appId, request, ct);
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "UpdateApplication", appId, updated is not null), ct);
 
+            return updated is not null
+                ? Results.Ok(updated)
+                : Results.NotFound(new { error = "Application not found" });
+        })
+        .WithName("UpdateApplication")
+        .RequireIamAction("UpdateApplication");
+
+        group.MapDelete("/apps/{appId}", async (
+            string appId,
+            HttpContext ctx,
+            IApplicationRegistryService registry,
+            CancellationToken ct) =>
+        {
+            var deleted = await registry.DeleteAppAsync(appId, ct);
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "DeleteApplication", appId, deleted), ct);
+
+            return deleted
+                ? Results.NoContent()
+                : Results.NotFound(new { error = "Application not found" });
+        })
+        .WithName("DeleteApplication")
+        .RequireIamAction("DeleteApplication");
+
+        #endregion
+
+        #region Credentials
+
+        group.MapPost("/apps/{appId}/rotate-key", async (
+            string appId,
+            HttpContext ctx,
+            IApplicationRegistryService registry,
+            CancellationToken ct) =>
+        {
             var newKey = await registry.RotateApiKeyAsync(appId, ct);
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "RotateApiKey", appId, newKey is not null), ct);
+
             if (newKey is null)
             {
                 return Results.NotFound(new { error = "Application not found" });
             }
 
-            // The plaintext key is returned exactly once; only its hash is stored.
             return Results.Ok(new
             {
                 appId,
@@ -118,13 +145,14 @@ public static class DashboardEndpoints
             });
         })
         .WithName("RotateApplicationApiKey")
-        .WithSummary("Rotate an application's long-term API key and return the new key once");
+        .WithSummary("Rotate an application's long-term API key and return the new key once")
+        .RequireIamAction("RotateApiKey");
 
-        // Mint short temporary secret (STS token) for an application from dashboard
         group.MapPost("/apps/{appId}/sts-token", async (
             string appId,
             [FromQuery] int? durationSeconds,
             [FromQuery] string? scope,
+            HttpContext ctx,
             IApplicationRegistryService registry,
             CancellationToken ct) =>
         {
@@ -134,39 +162,79 @@ public static class DashboardEndpoints
                 return Results.NotFound(new { error = "Application not found" });
             }
 
+            var callerId = ctx.User.FindFirst(GatewayAuth.PrincipalArnClaim)?.Value ?? "dashboard";
+
             var tokenResp = await registry.MintStsTokenDirectAsync(
                 appId,
-                durationSeconds ?? 3600,
+                durationSeconds ?? 0,
                 scope ?? "invoke",
                 isAdmin: false,
-                callerId: "DashboardUser",
+                callerId: callerId,
                 cancellationToken: ct);
+
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "MintStsToken", appId, success: true,
+                      $"scope={tokenResp.Scope}; ttl={tokenResp.DurationSeconds}s"), ct);
 
             return Results.Ok(tokenResp);
         })
-        .WithName("MintAppStsToken");
+        .WithName("MintAppStsToken")
+        .RequireIamAction("MintStsToken");
 
-        // Test application invocation from dashboard
+        /// Rotates the signing key itself, invalidating every outstanding STS token at once.
+        group.MapPost("/credentials/rotate-signing-key", async (
+            HttpContext ctx,
+            Services.Cloud.ISigningKeyProvider signingKeys,
+            IApplicationRegistryService registry,
+            CancellationToken ct) =>
+        {
+            var material = await signingKeys.RotateAsync(ct);
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "RotateSigningKey", "gateway", success: true,
+                      $"generation={material.Generation}"), ct);
+
+            return Results.Ok(new
+            {
+                generation = material.Generation,
+                rotatedAt = DateTimeOffset.UtcNow,
+                warning = "Every STS token issued under an earlier generation is now rejected."
+            });
+        })
+        .WithName("RotateSigningKey")
+        .WithSummary("Rotate the STS signing key, revoking all outstanding tokens")
+        .RequireIamAction("RotateSigningKey");
+
+        #endregion
+
+        #region Testing and telemetry
+
         group.MapPost("/apps/{appId}/test", async (
             string appId,
             [FromBody] InvokeAppRequest request,
+            HttpContext ctx,
             IModelRouter router,
+            IApplicationRegistryService registry,
             CancellationToken ct) =>
         {
             var result = await router.RouteAppRequestAsync(appId, request, ct);
-            return Results.Ok(result);
-        })
-        .WithName("TestApplication");
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "TestApplication", appId, result.Error is null), ct);
 
-        // Real-time metrics and analytics
+            // Same status mapping as the public invoke path, so the dashboard sees exactly
+            // what a real client would rather than a 200 with an error object inside.
+            return GatewayEndpoints.ToHttpResult(result);
+        })
+        .WithName("TestApplication")
+        .RequireIamAction("InvokeApplication");
+
         group.MapGet("/metrics", async (IApplicationRegistryService registry, CancellationToken ct) =>
         {
             var summary = await registry.GetMetricsSummaryAsync(ct);
             return Results.Ok(summary);
         })
-        .WithName("GetMetrics");
+        .WithName("GetMetrics")
+        .RequireIamAction("ReadMetrics");
 
-        // List supported and available models across Bedrock and Local
         group.MapGet("/models", async (ILocalModelService localService, CancellationToken ct) =>
         {
             var bedrockModels = new[]
@@ -182,59 +250,83 @@ public static class DashboardEndpoints
             };
 
             var localModels = await localService.ListAvailableLocalModelsAsync(ct);
-
-            return Results.Ok(new
-            {
-                bedrock = bedrockModels,
-                local = localModels
-            });
+            return Results.Ok(new { bedrock = bedrockModels, local = localModels });
         })
-        .WithName("GetModels");
+        .WithName("GetModels")
+        .RequireIamAction("ListModels");
 
-        // Get STS Credential status
         group.MapGet("/credentials/status", async (ISTSService stsService, CancellationToken ct) =>
         {
             var status = await stsService.GetStatusAsync(ct);
             return Results.Ok(status);
         })
-        .WithName("GetCredentialStatus");
+        .WithName("GetCredentialStatus")
+        .RequireIamAction("ReadCredentialStatus");
 
-        #region Guardrails Management Endpoints
+        #endregion
 
-        // Get Guardrail Configuration
+        #region Guardrails
+
         group.MapGet("/guardrails/config", (IGuardrailService guardrailService) =>
         {
-            var config = guardrailService.GetCurrentOptions();
-            return Results.Ok(config);
+            return Results.Ok(guardrailService.GetCurrentOptions());
         })
         .WithName("GetGuardrailConfig")
-        .WithSummary("Retrieve current enterprise safety guardrail rules and active mode");
+        .WithSummary("Retrieve current enterprise safety guardrail rules and active mode")
+        .RequireIamAction("ReadGuardrailConfig");
 
-        // Update Guardrail Configuration
-        group.MapPut("/guardrails/config", ([FromBody] GuardrailOptions options, IGuardrailService guardrailService) =>
+        group.MapPut("/guardrails/config", async (
+            [FromBody] GuardrailOptions options,
+            HttpContext ctx,
+            IGuardrailService guardrailService,
+            IApplicationRegistryService registry,
+            CancellationToken ct) =>
         {
+            var previous = guardrailService.GetCurrentOptions();
+
+            // Record the policy change before applying it. A guardrail switched off silently
+            // and reverted by a restart is precisely the case the audit trail has to survive.
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "UpdateGuardrailConfig", "gateway", success: true,
+                      $"enabled {previous.Enabled} -> {options.Enabled}; mode {previous.Mode} -> {options.Mode}"), ct);
+
             guardrailService.UpdateOptions(options);
+
             return Results.Ok(new { message = "Guardrail configuration updated successfully", config = options });
         })
         .WithName("UpdateGuardrailConfig")
-        .WithSummary("Update enterprise guardrail rules, PCI/PII detectors, and enforcement mode (Block/Redact/Audit)");
+        .WithSummary("Update enterprise guardrail rules, PCI/PII detectors, and enforcement mode")
+        .RequireIamAction("UpdateGuardrailConfig");
 
-        // Test text against Guardrail inspection sandbox
         group.MapPost("/guardrails/test", async (
             [FromBody] GuardrailTestRequest request,
             IGuardrailService guardrailService,
             CancellationToken ct) =>
         {
             var result = await guardrailService.EvaluateAsync(
-                request.Input,
-                modeOverride: request.Mode,
-                cancellationToken: ct);
+                request.Input, modeOverride: request.Mode, cancellationToken: ct);
 
             return Results.Ok(result);
         })
         .WithName("TestGuardrails")
-        .WithSummary("Interactive sandbox to test text against PCI, PII, Secrets, and Injection guardrails");
+        .WithSummary("Interactive sandbox to test text against PCI, PII, Secrets, and Injection guardrails")
+        .RequireIamAction("TestGuardrails");
 
         #endregion
     }
+}
+
+public static class IamActionEndpointExtensions
+{
+    /// <summary>
+    /// Names the IAM action this endpoint requires. The configured access-control provider
+    /// evaluates it — the simulator's IAM policy engine in TEST, IAM policy documents in PROD.
+    /// </summary>
+    public static RouteHandlerBuilder RequireIamAction(this RouteHandlerBuilder builder, string action)
+        => builder.RequireAuthorization(policy =>
+        {
+            policy.AddAuthenticationSchemes(GatewayAuth.Scheme);
+            policy.RequireAuthenticatedUser();
+            policy.AddRequirements(new IamActionRequirement(action));
+        });
 }

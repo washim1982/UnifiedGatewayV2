@@ -19,5 +19,8 @@ public interface IApplicationRegistryService
     Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(string? appId, string apiKey, int durationSeconds = 3600, string scope = "invoke", string? callerId = null, CancellationToken cancellationToken = default);
     Task<AppStsTokenResponse> MintStsTokenDirectAsync(string appId, int durationSeconds = 3600, string scope = "invoke", bool isAdmin = false, string? callerId = null, CancellationToken cancellationToken = default);
     Task RecordMetricAsync(RequestLogEntry log, CancellationToken cancellationToken = default);
+
+    /// <summary>Appends a privileged management action to the durable audit trail.</summary>
+    Task RecordManagementActionAsync(ManagementAuditEntry entry, CancellationToken cancellationToken = default);
     Task<GatewayMetricsSummary> GetMetricsSummaryAsync(CancellationToken cancellationToken = default);
 }

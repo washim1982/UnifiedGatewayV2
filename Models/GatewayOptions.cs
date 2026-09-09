@@ -56,10 +56,39 @@ public class LlamaCppOptions
 
 public class SecurityOptions
 {
-    public string AdminApiKey { get; set; } = "ug-admin-default-change-in-prod";
+    /// <summary>
+    /// Development-only fallback for the master admin credential. In every other environment
+    /// the key is read from the secret store (Gateway:Cloud:Secrets:AdminApiKeyName) and
+    /// startup fails if this value is set to a default or left empty.
+    /// </summary>
+    public string AdminApiKey { get; set; } = string.Empty;
+
     public bool EnforceAppApiKey { get; set; } = true;
     public int RateLimitPerMinute { get; set; } = 120;
-    public string[] AllowedCorsOrigins { get; set; } = ["*"];
+
+    /// <summary>Requests per minute allowed against credential-issuing endpoints.</summary>
+    public int TokenRateLimitPerMinute { get; set; } = 10;
+
+    /// <summary>Requests per minute allowed against the management plane.</summary>
+    public int ManagementRateLimitPerMinute { get; set; } = 60;
+
+    /// <summary>
+    /// Cross-origin origins permitted to call the gateway. An empty list means no
+    /// cross-origin access. "*" is rejected at startup outside Development.
+    /// </summary>
+    public string[] AllowedCorsOrigins { get; set; } = [];
+
+    /// <summary>Default lifetime applied when a caller does not request one.</summary>
+    public int DefaultStsTokenLifetimeSeconds { get; set; } = 900; // 15 minutes
+
+    /// <summary>Hard ceiling on any requested STS lifetime.</summary>
+    public int MaxStsTokenLifetimeSeconds { get; set; } = 3600; // 1 hour
+
+    /// <summary>Emit HSTS and redirect HTTP to HTTPS. Disable only for local development.</summary>
+    public bool RequireHttps { get; set; } = true;
+
+    /// <summary>Milliseconds any single guardrail pattern may run before it is treated as a violation.</summary>
+    public int RegexTimeoutMs { get; set; } = 250;
 
     /// <summary>Abuse control: reject prompts longer than this many characters (0 = unlimited).</summary>
     public int MaxInputCharacters { get; set; } = 100_000;

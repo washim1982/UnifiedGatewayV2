@@ -53,6 +53,67 @@ public record RequestLogEntry
 
     [JsonPropertyName("errorMessage")]
     public string? ErrorMessage { get; init; }
+
+    // --- Actor attribution -------------------------------------------------
+    // Without these the trail answers "what was invoked" but not "by whom",
+    // which is what a repudiation control actually needs.
+
+    /// <summary>Key prefix or principal ARN the caller authenticated as.</summary>
+    [JsonPropertyName("actor")]
+    public string? Actor { get; init; }
+
+    /// <summary>How the caller authenticated (AppApiKey, AppStsToken, GatewayAdminStsToken, ...).</summary>
+    [JsonPropertyName("authType")]
+    public string? AuthType { get; init; }
+
+    /// <summary>jti of the STS token used, when one was presented.</summary>
+    [JsonPropertyName("tokenId")]
+    public string? TokenId { get; init; }
+
+    /// <summary>Source IP as seen by the gateway.</summary>
+    [JsonPropertyName("sourceIp")]
+    public string? SourceIp { get; init; }
+
+    /// <summary>Correlation id carried through the request.</summary>
+    [JsonPropertyName("traceId")]
+    public string? TraceId { get; init; }
+}
+
+/// <summary>
+/// A privileged management-plane action. Recorded to the same append-only trail as
+/// invocations so create/update/delete/rotate/policy changes are not invisible to forensics.
+/// </summary>
+public record ManagementAuditEntry
+{
+    [JsonPropertyName("id")]
+    public string Id { get; init; } = Guid.NewGuid().ToString("N");
+
+    [JsonPropertyName("kind")]
+    public string Kind { get; init; } = "management";
+
+    [JsonPropertyName("action")]
+    public string Action { get; init; } = string.Empty;
+
+    [JsonPropertyName("resource")]
+    public string? Resource { get; init; }
+
+    [JsonPropertyName("actor")]
+    public string? Actor { get; init; }
+
+    [JsonPropertyName("authType")]
+    public string? AuthType { get; init; }
+
+    [JsonPropertyName("sourceIp")]
+    public string? SourceIp { get; init; }
+
+    [JsonPropertyName("success")]
+    public bool Success { get; init; }
+
+    [JsonPropertyName("detail")]
+    public string? Detail { get; init; }
+
+    [JsonPropertyName("timestamp")]
+    public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.UtcNow;
 }
 
 public class GatewayMetricsSummary

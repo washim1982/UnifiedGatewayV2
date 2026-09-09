@@ -1,4 +1,3 @@
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
@@ -12,18 +11,17 @@ public class ApplicationRegistryTests
     private readonly ApplicationRegistryService _registryService;
     private readonly ISecurityService _securityService;
     private readonly GatewayOptions _options;
+    private readonly StubAdminCredentialService _adminCredentials;
 
     public ApplicationRegistryTests()
     {
-        var dataProtectionProvider = new EphemeralDataProtectionProvider();
-        _securityService = new SecurityService(dataProtectionProvider, NullLogger<SecurityService>.Instance);
+        (_securityService, _) = TestFactory.CreateSecurityService();
 
         var tempDir = Path.Combine(Path.GetTempPath(), "ug-tests-" + Guid.NewGuid().ToString("N"));
         _options = new GatewayOptions
         {
             Security = new SecurityOptions
             {
-                AdminApiKey = "ug-test-admin-secret-key",
                 EnforceAppApiKey = true
             },
             Storage = new StorageOptions
@@ -33,8 +31,11 @@ public class ApplicationRegistryTests
             }
         };
 
+        _adminCredentials = new StubAdminCredentialService(_securityService, "ug-test-admin-secret-key");
+
         _registryService = new ApplicationRegistryService(
             _securityService,
+            _adminCredentials,
             Options.Create(_options),
             NullLogger<ApplicationRegistryService>.Instance);
     }
@@ -124,7 +125,7 @@ public class ApplicationRegistryTests
     {
         await _registryService.CreateAppAsync(new CreateAppRequest { AppId = "target-app", Name = "Target App" });
 
-        var (adminToken, _) = _securityService.IssueAppStsToken("*", TimeSpan.FromMinutes(30), "invoke", isAdmin: true);
+        var (adminToken, _) = await _securityService.IssueAppStsTokenAsync("*", TimeSpan.FromMinutes(30), "invoke", isAdmin: true);
 
         var (isValid, app) = await _registryService.AuthenticateAppAsync("target-app", adminToken);
         Assert.True(isValid);
@@ -237,6 +238,7 @@ public class ApplicationRegistryTests
         // Simulate a process restart: a fresh service over the same data directory.
         var restarted = new ApplicationRegistryService(
             _securityService,
+            _adminCredentials,
             Options.Create(_options),
             NullLogger<ApplicationRegistryService>.Instance);
 

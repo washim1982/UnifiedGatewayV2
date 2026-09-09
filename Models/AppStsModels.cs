@@ -78,6 +78,14 @@ public record AppStsTokenPayload
 
     [JsonPropertyName("callerId")]
     public string? CallerId { get; init; }
+
+    /// <summary>
+    /// Generation of the signing key this token was issued under. Validation rejects any
+    /// token whose generation is behind the current key, so rotating the signing key
+    /// revokes outstanding tokens immediately.
+    /// </summary>
+    [JsonPropertyName("gen")]
+    public int Generation { get; init; } = 1;
 }
 
 /// <summary>

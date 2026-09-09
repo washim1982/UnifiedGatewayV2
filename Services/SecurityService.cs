@@ -1,36 +1,53 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
+using UnifiedGateway.Services.Cloud;
 
 namespace UnifiedGateway.Services;
 
+/// <summary>
+/// Key generation, hashing, and application STS token issuance.
+///
+/// Tokens are signed with HMAC-SHA256 using a key held in the environment's secret store
+/// (simulator KMS or AWS Secrets Manager + KMS), never with a local key ring on the web
+/// tier. Every token carries the signing-key generation, so rotation is an immediate,
+/// fleet-wide revocation.
+/// </summary>
 public class SecurityService : ISecurityService
 {
     private const string StsPrefix = "ug_sts_";
-    private readonly IDataProtector _secretProtector;
-    private readonly IDataProtector _stsProtector;
+
+    private readonly ISigningKeyProvider _signingKeys;
+    private readonly ICryptoProvider _crypto;
+    private readonly SecurityOptions _securityOptions;
     private readonly ILogger<SecurityService> _logger;
 
-    public SecurityService(IDataProtectionProvider dataProtectionProvider, ILogger<SecurityService> logger)
+    /// <summary>Revoked jti values with the instant they stop mattering (their own expiry).</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _revoked = new();
+
+    public SecurityService(
+        ISigningKeyProvider signingKeys,
+        ICryptoProvider crypto,
+        IOptions<GatewayOptions> gatewayOptions,
+        ILogger<SecurityService> logger)
     {
-        _secretProtector = dataProtectionProvider.CreateProtector("UnifiedGateway.Security.SecretsProtector.v1");
-        _stsProtector = dataProtectionProvider.CreateProtector("UnifiedGateway.Security.StsTokenSigner.v1");
+        _signingKeys = signingKeys;
+        _crypto = crypto;
+        _securityOptions = gatewayOptions.Value.Security;
         _logger = logger;
     }
 
+    #region API keys
+
     public (string rawKey, string keyHash, string keyPrefix) GenerateApiKey()
     {
-        var randomBytes = new byte[32];
-        using (var rng = RandomNumberGenerator.Create())
-        {
-            rng.GetBytes(randomBytes);
-        }
-
+        var randomBytes = RandomNumberGenerator.GetBytes(32);
         var keySuffix = Convert.ToHexString(randomBytes).ToLowerInvariant();
         var rawKey = $"ug_live_{keySuffix}";
-        var keyPrefix = rawKey[..12]; // e.g. "ug_live_a1b2"
+        var keyPrefix = rawKey[..12];
         var keyHash = HashKey(rawKey);
 
         return (rawKey, keyHash, keyPrefix);
@@ -38,82 +55,71 @@ public class SecurityService : ISecurityService
 
     public string HashKey(string apiKey)
     {
-        var bytes = Encoding.UTF8.GetBytes(apiKey);
-        var hashBytes = SHA256.HashData(bytes);
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(apiKey));
         return Convert.ToHexString(hashBytes).ToLowerInvariant();
     }
 
     public bool VerifyKey(string apiKey, string hash)
     {
+        if (string.IsNullOrEmpty(apiKey) || string.IsNullOrEmpty(hash))
+        {
+            return false;
+        }
+
         var computed = HashKey(apiKey);
-        return CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(computed),
-            Encoding.UTF8.GetBytes(hash)
-        );
-    }
+        var computedBytes = Encoding.UTF8.GetBytes(computed);
+        var expectedBytes = Encoding.UTF8.GetBytes(hash);
 
-    public string Encrypt(string plainText)
-    {
-        if (string.IsNullOrEmpty(plainText))
-            return string.Empty;
+        // FixedTimeEquals requires equal lengths; a length mismatch is already a mismatch.
+        if (computedBytes.Length != expectedBytes.Length)
+        {
+            return false;
+        }
 
-        try
-        {
-            return _secretProtector.Protect(plainText);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to encrypt secret payload");
-            throw;
-        }
-    }
-
-    public string Decrypt(string cipherText)
-    {
-        if (string.IsNullOrEmpty(cipherText))
-            return string.Empty;
-
-        try
-        {
-            return _secretProtector.Unprotect(cipherText);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to decrypt secret payload");
-            throw;
-        }
+        return CryptographicOperations.FixedTimeEquals(computedBytes, expectedBytes);
     }
 
     public string MaskSecret(string? secret, int visibleChars = 4)
     {
-        if (string.IsNullOrEmpty(secret))
-            return "******";
+        if (string.IsNullOrEmpty(secret)) return "******";
+        if (secret.Length <= visibleChars * 2) return "******";
 
-        if (secret.Length <= visibleChars)
-            return "******";
-
-        var prefix = secret[..visibleChars];
-        return $"{prefix}******{secret[^visibleChars..]}";
+        return $"{secret[..visibleChars]}******{secret[^visibleChars..]}";
     }
 
-    #region Application Short Temporary Secrets (STS) Implementation
+    #endregion
 
-    public (string token, DateTimeOffset expiresAt) IssueAppStsToken(
+    #region Envelope encryption
+
+    public async Task<string> EncryptAsync(string plainText, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(plainText)) return string.Empty;
+        return await _crypto.EncryptAsync(plainText, cancellationToken);
+    }
+
+    public async Task<string> DecryptAsync(string cipherText, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(cipherText)) return string.Empty;
+        return await _crypto.DecryptAsync(cipherText, cancellationToken);
+    }
+
+    #endregion
+
+    #region Application STS tokens
+
+    public async Task<(string token, DateTimeOffset expiresAt)> IssueAppStsTokenAsync(
         string appId,
         TimeSpan duration,
         string scope = "invoke",
         bool isAdmin = false,
-        string? callerId = null)
+        string? callerId = null,
+        CancellationToken cancellationToken = default)
     {
-        // Enforce safety bounds on token TTL (min 30s, max 7 days)
-        var clampedDuration = duration < TimeSpan.FromSeconds(30)
-            ? TimeSpan.FromSeconds(30)
-            : duration > TimeSpan.FromDays(7)
-                ? TimeSpan.FromDays(7)
-                : duration;
-
+        var clampedDuration = ClampDuration(duration);
         var now = DateTimeOffset.UtcNow;
         var expiresAt = now.Add(clampedDuration);
+
+        var signingKey = await _signingKeys.GetCurrentAsync(cancellationToken);
 
         var payload = new AppStsTokenPayload
         {
@@ -123,21 +129,19 @@ public class SecurityService : ISecurityService
             ExpiresAtUnix = expiresAt.ToUnixTimeSeconds(),
             Scope = string.IsNullOrWhiteSpace(scope) ? "invoke" : scope.Trim().ToLowerInvariant(),
             IsAdmin = isAdmin,
-            CallerId = callerId
+            CallerId = callerId,
+            Generation = signingKey.Generation
         };
 
-        var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(payload);
-        var payloadSegment = Base64UrlEncode(jsonBytes);
+        var payloadSegment = Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload));
+        var signatureSegment = Base64UrlEncode(ComputeSignature(payloadSegment, signingKey.Key));
 
-        // Sign payload with DataProtection-backed MAC
-        var signatureBytes = _stsProtector.Protect(Encoding.UTF8.GetBytes(payloadSegment));
-        var signatureSegment = Base64UrlEncode(signatureBytes);
-
-        var token = $"{StsPrefix}{payloadSegment}.{signatureSegment}";
-        return (token, expiresAt);
+        return ($"{StsPrefix}{payloadSegment}.{signatureSegment}", expiresAt);
     }
 
-    public (bool isValid, AppStsTokenPayload? payload, string? failureReason) ValidateAppStsToken(string token)
+    public async Task<(bool isValid, AppStsTokenPayload? payload, string? failureReason)> ValidateAppStsTokenAsync(
+        string token,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(token))
             return (false, null, "Token is empty");
@@ -146,75 +150,91 @@ public class SecurityService : ISecurityService
         if (cleanToken.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
             cleanToken = cleanToken[7..].Trim();
 
-        if (!cleanToken.StartsWith(StsPrefix, StringComparison.OrdinalIgnoreCase))
+        if (!cleanToken.StartsWith(StsPrefix, StringComparison.Ordinal))
             return (false, null, "Token does not have a valid STS prefix (expected 'ug_sts_')");
 
-        var tokenBody = cleanToken[StsPrefix.Length..];
-        var parts = tokenBody.Split('.', 2);
+        var parts = cleanToken[StsPrefix.Length..].Split('.', 2);
         if (parts.Length != 2)
             return (false, null, "Malformed STS token format");
 
         var payloadSegment = parts[0];
         var signatureSegment = parts[1];
 
-        // 1. Verify Signature & Integrity
-        byte[] signatureBytes;
+        // 1. Verify the signature before parsing anything out of the payload.
+        SigningKeyMaterial signingKey;
         try
         {
-            signatureBytes = Base64UrlDecode(signatureSegment);
+            signingKey = await _signingKeys.GetCurrentAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Fail closed: without the signing key nothing can be trusted.
+            _logger.LogError(ex, "Signing key unavailable; rejecting STS token.");
+            return (false, null, "Signing key unavailable");
+        }
+
+        byte[] presentedSignature;
+        try
+        {
+            presentedSignature = Base64UrlDecode(signatureSegment);
         }
         catch
         {
             return (false, null, "Invalid base64 signature encoding");
         }
 
-        byte[] verifiedPayloadBytes;
-        try
+        var expectedSignature = ComputeSignature(payloadSegment, signingKey.Key);
+        if (presentedSignature.Length != expectedSignature.Length ||
+            !CryptographicOperations.FixedTimeEquals(presentedSignature, expectedSignature))
         {
-            verifiedPayloadBytes = _stsProtector.Unprotect(signatureBytes);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning("STS token signature validation failed: {Message}", ex.Message);
+            _logger.LogWarning("STS token signature verification failed.");
             return (false, null, "STS token signature verification failed or token has been tampered with");
         }
 
-        var verifiedPayloadString = Encoding.UTF8.GetString(verifiedPayloadBytes);
-        if (!string.Equals(verifiedPayloadString, payloadSegment, StringComparison.Ordinal))
-        {
-            return (false, null, "STS token payload integrity mismatch");
-        }
-
-        // 2. Decode claims payload
+        // 2. Decode claims.
         AppStsTokenPayload? payload;
         try
         {
-            var jsonBytes = Base64UrlDecode(payloadSegment);
-            payload = JsonSerializer.Deserialize<AppStsTokenPayload>(jsonBytes);
+            payload = JsonSerializer.Deserialize<AppStsTokenPayload>(Base64UrlDecode(payloadSegment));
         }
         catch (Exception ex)
         {
             return (false, null, $"Failed to parse STS claims payload: {ex.Message}");
         }
 
-        if (payload == null)
+        if (payload is null)
             return (false, null, "STS claims payload is null");
 
-        // 3. Expiration Check
-        var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        if (nowUnix > payload.ExpiresAtUnix)
+        // 3. Signing-key generation. A rotated key invalidates every earlier token.
+        if (payload.Generation != signingKey.Generation)
         {
-            return (false, payload, $"STS token expired at {DateTimeOffset.FromUnixTimeSeconds(payload.ExpiresAtUnix):u}");
+            return (false, payload,
+                $"Token was issued under signing key generation {payload.Generation}; current generation is {signingKey.Generation}");
+        }
+
+        // 4. Expiry.
+        if (DateTimeOffset.UtcNow.ToUnixTimeSeconds() > payload.ExpiresAtUnix)
+        {
+            return (false, payload,
+                $"STS token expired at {DateTimeOffset.FromUnixTimeSeconds(payload.ExpiresAtUnix):u}");
+        }
+
+        // 5. Targeted revocation.
+        if (IsRevoked(payload.Jti))
+        {
+            return (false, payload, "STS token has been revoked");
         }
 
         return (true, payload, null);
     }
 
-    public AppStsInspectResponse InspectAppStsToken(string token)
+    public async Task<AppStsInspectResponse> InspectAppStsTokenAsync(
+        string token,
+        CancellationToken cancellationToken = default)
     {
-        var (isValid, payload, failureReason) = ValidateAppStsToken(token);
+        var (isValid, payload, failureReason) = await ValidateAppStsTokenAsync(token, cancellationToken);
 
-        if (payload == null)
+        if (payload is null)
         {
             return new AppStsInspectResponse
             {
@@ -226,8 +246,6 @@ public class SecurityService : ISecurityService
         var issuedAt = DateTimeOffset.FromUnixTimeSeconds(payload.IssuedAtUnix);
         var expiresAt = DateTimeOffset.FromUnixTimeSeconds(payload.ExpiresAtUnix);
         var now = DateTimeOffset.UtcNow;
-        var isExpired = now > expiresAt;
-        var expiresInSeconds = Math.Max(0, (expiresAt - now).TotalSeconds);
 
         return new AppStsInspectResponse
         {
@@ -236,21 +254,78 @@ public class SecurityService : ISecurityService
             IsAdmin = payload.IsAdmin,
             IssuedAt = issuedAt,
             ExpiresAt = expiresAt,
-            ExpiresInSeconds = Math.Round(expiresInSeconds, 1),
-            IsExpired = isExpired,
+            ExpiresInSeconds = Math.Round(Math.Max(0, (expiresAt - now).TotalSeconds), 1),
+            IsExpired = now > expiresAt,
             Scope = payload.Scope,
             CallerId = payload.CallerId,
             Error = isValid ? null : failureReason
         };
     }
 
-    private static string Base64UrlEncode(byte[] input)
+    public void RevokeToken(string jti, DateTimeOffset expiresAt)
     {
-        return Convert.ToBase64String(input)
-            .TrimEnd('=')
-            .Replace('+', '-')
-            .Replace('/', '_');
+        if (string.IsNullOrWhiteSpace(jti)) return;
+
+        _revoked[jti] = expiresAt;
+        PruneRevoked();
+
+        _logger.LogWarning("STS token {Jti} revoked; it will be rejected until it expires at {ExpiresAt:u}.",
+            jti, expiresAt);
     }
+
+    private bool IsRevoked(string jti)
+    {
+        if (!_revoked.TryGetValue(jti, out var expiresAt))
+        {
+            return false;
+        }
+
+        if (DateTimeOffset.UtcNow > expiresAt)
+        {
+            _revoked.TryRemove(jti, out _);
+            return false;
+        }
+
+        return true;
+    }
+
+    private void PruneRevoked()
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var entry in _revoked)
+        {
+            if (now > entry.Value)
+            {
+                _revoked.TryRemove(entry.Key, out _);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Bounds the requested lifetime. The ceiling is configuration-driven so an environment
+    /// can tighten it, and it is what stops a "short temporary secret" being a week long.
+    /// </summary>
+    private TimeSpan ClampDuration(TimeSpan requested)
+    {
+        var min = TimeSpan.FromSeconds(30);
+        var max = TimeSpan.FromSeconds(Math.Max(60, _securityOptions.MaxStsTokenLifetimeSeconds));
+
+        if (requested < min) return min;
+        if (requested > max)
+        {
+            _logger.LogInformation(
+                "Requested STS lifetime {Requested} exceeds the ceiling {Max}; clamping.", requested, max);
+            return max;
+        }
+
+        return requested;
+    }
+
+    private static byte[] ComputeSignature(string payloadSegment, byte[] key)
+        => HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(payloadSegment));
+
+    private static string Base64UrlEncode(byte[] input) =>
+        Convert.ToBase64String(input).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static byte[] Base64UrlDecode(string input)
     {

@@ -1,8 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
+using UnifiedGateway.Services.Cloud;
 
 namespace UnifiedGateway.Endpoints;
 
@@ -13,9 +13,13 @@ public static class GatewayEndpoints
         var group = app.MapGroup("/gateway")
             .WithTags("Gateway Invocation & STS Tokens");
 
-        #region Application STS Token Endpoints
+        #region Application STS token endpoints
 
-        // Exchange long-term Application API Key or Master Admin Key for Short Temporary Secret (STS Token)
+        // Exchange a long-term key for a short temporary secret.
+        //
+        // Rate-limited far more tightly than invocation: this endpoint searches every
+        // registered application for a matching key hash, which makes it the natural
+        // brute-force oracle if left open.
         group.MapPost("/sts/token", async (
             [FromBody] AppStsTokenRequest? request,
             [FromHeader(Name = "X-API-Key")] string? xApiKey,
@@ -33,40 +37,36 @@ public static class GatewayEndpoints
                 return Results.Json(new
                 {
                     error = "UNAUTHORIZED",
-                    message = "Missing API key. Provide long-term key in 'apiKey' body property, 'X-API-Key' header, or 'Authorization: Bearer <key>'."
+                    message = "Missing API key. Provide it in the 'apiKey' body property, the 'X-API-Key' header, or 'Authorization: Bearer <key>'."
                 }, statusCode: StatusCodes.Status401Unauthorized);
             }
 
             var tokenResponse = await registryService.IssueStsTokenForAppAsync(
-                body.AppId,
-                apiKey,
-                body.DurationSeconds,
-                body.Scope,
-                body.CallerId,
-                ct);
+                body.AppId, apiKey, body.DurationSeconds, body.Scope, body.CallerId, ct);
 
             if (tokenResponse == null)
             {
                 return Results.Json(new
                 {
                     error = "UNAUTHORIZED",
-                    message = "Invalid Application API Key or Master Admin Key provided for STS token generation."
+                    message = "Invalid application API key or master admin key."
                 }, statusCode: StatusCodes.Status401Unauthorized);
             }
 
             return Results.Ok(tokenResponse);
         })
         .WithName("GenerateStsToken")
-        .WithSummary("Exchange a long-term API key for a short temporary secret (STS token) with custom TTL")
+        .WithSummary("Exchange a long-term API key for a short temporary secret (STS token)")
         .Produces<AppStsTokenResponse>(StatusCodes.Status200OK)
-        .Produces(StatusCodes.Status401Unauthorized);
+        .Produces(StatusCodes.Status401Unauthorized)
+        .RequireRateLimiting("token-issuance");
 
-        // Inspect and decode an STS token claims & remaining TTL
-        group.MapPost("/sts/inspect", (
+        group.MapPost("/sts/inspect", async (
             [FromBody] TokenInspectRequest? request,
             [FromHeader(Name = "X-API-Key")] string? xApiKey,
             [FromHeader(Name = "Authorization")] string? authHeader,
-            ISecurityService securityService) =>
+            ISecurityService securityService,
+            CancellationToken ct) =>
         {
             var token = !string.IsNullOrWhiteSpace(request?.Token)
                 ? request.Token.Trim()
@@ -77,18 +77,18 @@ public static class GatewayEndpoints
                 return Results.BadRequest(new { error = "Missing token to inspect." });
             }
 
-            var inspection = securityService.InspectAppStsToken(token);
+            var inspection = await securityService.InspectAppStsTokenAsync(token, ct);
             return Results.Ok(inspection);
         })
         .WithName("InspectStsToken")
-        .WithSummary("Inspect decoded claims, expiration, and validity of an Application STS token")
-        .Produces<AppStsInspectResponse>(StatusCodes.Status200OK);
+        .WithSummary("Inspect claims, expiration, and validity of an application STS token")
+        .Produces<AppStsInspectResponse>(StatusCodes.Status200OK)
+        .RequireRateLimiting("token-issuance");
 
         #endregion
 
-        #region Application Invocation Endpoints
+        #region Application invocation
 
-        // Per-application generated endpoint (Accepts long-term API key OR short-term STS token)
         group.MapPost("/{appId}/invoke", async (
             string appId,
             [FromBody] InvokeAppRequest request,
@@ -110,51 +110,46 @@ public static class GatewayEndpoints
                     Error = new GatewayError
                     {
                         Code = "UNAUTHORIZED",
-                        Message = "Invalid, expired, or missing API key / STS token for this application. Pass via 'X-API-Key' or 'Authorization: Bearer <token>'."
+                        Message = "Invalid, expired, or missing API key / STS token for this application."
                     }
                 }, statusCode: StatusCodes.Status401Unauthorized);
             }
 
             var response = await router.RouteAppRequestAsync(appId, request, ct);
-            return Results.Ok(response);
+            return ToHttpResult(response);
         })
         .WithName("InvokeApplication")
         .WithSummary("Invoke a registered AI application with auto-applied system prompt and model routing")
         .Produces<UniversalResponse>(StatusCodes.Status200OK)
         .Produces<UniversalResponse>(StatusCodes.Status401Unauthorized)
-        .Produces<UniversalResponse>(StatusCodes.Status404NotFound)
+        .Produces<UniversalResponse>(StatusCodes.Status422UnprocessableEntity)
         .RequireRateLimiting("per-app");
 
-        // Universal direct endpoint for admin/orchestrators (Accepts Admin Master API Key OR Admin STS Token)
         group.MapPost("/universal/invoke", async (
             [FromBody] UniversalRequest request,
             [FromHeader(Name = "X-API-Key")] string? xApiKey,
             [FromHeader(Name = "Authorization")] string? authHeader,
             IOptions<GatewayOptions> options,
             ISecurityService securityService,
+            IAdminCredentialService adminCredentials,
             IModelRouter router,
             CancellationToken ct) =>
         {
-            var apiKey = ExtractApiKey(xApiKey, authHeader);
-            var expectedKey = options.Value.Security.AdminApiKey;
-
             if (options.Value.Security.EnforceAppApiKey)
             {
+                var apiKey = ExtractApiKey(xApiKey, authHeader);
                 var isAuthorized = false;
 
                 if (!string.IsNullOrWhiteSpace(apiKey))
                 {
-                    if (apiKey.StartsWith("ug_sts_", StringComparison.OrdinalIgnoreCase))
+                    if (apiKey.StartsWith("ug_sts_", StringComparison.Ordinal))
                     {
-                        var (isStsValid, payload, _) = securityService.ValidateAppStsToken(apiKey);
-                        if (isStsValid && payload != null && payload.IsAdmin)
-                        {
-                            isAuthorized = true;
-                        }
+                        var (isStsValid, payload, _) = await securityService.ValidateAppStsTokenAsync(apiKey, ct);
+                        isAuthorized = isStsValid && payload is { IsAdmin: true };
                     }
                     else
                     {
-                        isAuthorized = securityService.VerifyKey(apiKey, securityService.HashKey(expectedKey));
+                        isAuthorized = await adminCredentials.VerifyAsync(apiKey, ct);
                     }
                 }
 
@@ -166,14 +161,14 @@ public static class GatewayEndpoints
                         Error = new GatewayError
                         {
                             Code = "ADMIN_UNAUTHORIZED",
-                            Message = "Universal endpoint requires a valid Master Admin API Key or Admin STS Token."
+                            Message = "The universal endpoint requires a valid master admin key or admin STS token."
                         }
                     }, statusCode: StatusCodes.Status401Unauthorized);
                 }
             }
 
             var response = await router.RouteAsync(request, ct);
-            return Results.Ok(response);
+            return ToHttpResult(response);
         })
         .WithName("InvokeUniversal")
         .WithSummary("Direct universal schema invocation with specified model and provider")
@@ -181,29 +176,47 @@ public static class GatewayEndpoints
         .Produces<UniversalResponse>(StatusCodes.Status401Unauthorized)
         .RequireRateLimiting("per-app");
 
-        // Gateway health & backend status check
-        group.MapGet("/health", async (
-            ISTSService stsService,
-            ILocalModelService localModelService,
-            CancellationToken ct) =>
+        // Unauthenticated liveness only. Anything that reveals backend topology, role ARNs
+        // or failure detail lives behind the authenticated management plane instead.
+        group.MapGet("/health", () => Results.Ok(new
         {
-            var awsStatus = await stsService.GetStatusAsync(ct);
-            var localStatus = await localModelService.ProbeStatusAsync(ct);
-
-            var isHealthy = awsStatus.IsInitialized || localStatus.Values.Any(v => v);
-
-            return Results.Ok(new
-            {
-                status = isHealthy ? "Healthy" : "Degraded",
-                timestamp = DateTimeOffset.UtcNow,
-                aws = awsStatus,
-                localBackends = localStatus
-            });
-        })
+            status = "Healthy",
+            timestamp = DateTimeOffset.UtcNow
+        }))
         .WithName("GatewayHealth")
-        .WithSummary("Probe STS credentials and local backend health");
+        .WithSummary("Liveness probe");
 
         #endregion
+    }
+
+    /// <summary>
+    /// Maps a gateway error code onto the HTTP status a client should actually see.
+    /// Returning 200 for a blocked or failed request makes SDKs, load balancers and
+    /// monitoring read enforcement and outages as success.
+    /// </summary>
+    internal static IResult ToHttpResult(UniversalResponse response)
+    {
+        if (response.Error is null)
+        {
+            return Results.Ok(response);
+        }
+
+        var status = response.Error.Code switch
+        {
+            "GUARDRAIL_BLOCKED" => StatusCodes.Status422UnprocessableEntity,
+            "OUTPUT_GUARDRAIL_BLOCKED" => StatusCodes.Status422UnprocessableEntity,
+            "OUTPUT_GUARDRAIL_ERROR" => StatusCodes.Status502BadGateway,
+            "INPUT_TOO_LARGE" => StatusCodes.Status413PayloadTooLarge,
+            "APP_NOT_FOUND" => StatusCodes.Status404NotFound,
+            "APP_INACTIVE" => StatusCodes.Status409Conflict,
+            "PRIMARY_PROVIDER_FAILED" => StatusCodes.Status502BadGateway,
+            "ALL_PROVIDERS_FAILED" => StatusCodes.Status502BadGateway,
+            "LOCAL_ENDPOINT_TIMEOUT" => StatusCodes.Status504GatewayTimeout,
+            "LOCAL_ENDPOINT_UNAVAILABLE" => StatusCodes.Status502BadGateway,
+            _ => StatusCodes.Status500InternalServerError
+        };
+
+        return Results.Json(response, statusCode: status);
     }
 
     private static string ExtractApiKey(string? xApiKey, string? authHeader)
@@ -213,9 +226,9 @@ public static class GatewayEndpoints
 
         if (!string.IsNullOrWhiteSpace(authHeader))
         {
-            if (authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-                return authHeader[7..].Trim();
-            return authHeader.Trim();
+            return authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+                ? authHeader[7..].Trim()
+                : authHeader.Trim();
         }
 
         return string.Empty;

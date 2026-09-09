@@ -1,0 +1,1135 @@
+<title>Gateway Hardening Review</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+  :root {
+    --ground: #eef1f4;
+    --surface: #ffffff;
+    --surface-sunk: #e6eaee;
+    --ink: #141920;
+    --ink-soft: #3d4855;
+    --muted: #66727f;
+    --rule: #d5dbe2;
+    --rule-soft: #e3e8ed;
+    --accent: #26566f;
+    --accent-soft: #dfe9ef;
+
+    --crit: #9c2a26;
+    --crit-bg: #f7e4e2;
+    --high: #a4620f;
+    --high-bg: #f9ebda;
+    --med: #6d6417;
+    --med-bg: #f2efdb;
+    --low: #46606f;
+    --low-bg: #e2eaef;
+    --good: #2c6449;
+    --good-bg: #dfeee6;
+
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #11151a;
+      --surface: #181d23;
+      --surface-sunk: #1f252c;
+      --ink: #e2e7ec;
+      --ink-soft: #bcc5cf;
+      --muted: #8b97a4;
+      --rule: #2b333c;
+      --rule-soft: #232a32;
+      --accent: #7fb3d1;
+      --accent-soft: #1d2b34;
+
+      --crit: #e2726c;
+      --crit-bg: #33201f;
+      --high: #dda054;
+      --high-bg: #322619;
+      --med: #c2b45c;
+      --med-bg: #2b2919;
+      --low: #90a9b8;
+      --low-bg: #202a31;
+      --good: #6dbb94;
+      --good-bg: #1a2a23;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #11151a;
+    --surface: #181d23;
+    --surface-sunk: #1f252c;
+    --ink: #e2e7ec;
+    --ink-soft: #bcc5cf;
+    --muted: #8b97a4;
+    --rule: #2b333c;
+    --rule-soft: #232a32;
+    --accent: #7fb3d1;
+    --accent-soft: #1d2b34;
+
+    --crit: #e2726c;
+    --crit-bg: #33201f;
+    --high: #dda054;
+    --high-bg: #322619;
+    --med: #c2b45c;
+    --med-bg: #2b2919;
+    --low: #90a9b8;
+    --low-bg: #202a31;
+    --good: #6dbb94;
+    --good-bg: #1a2a23;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 28px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 44px;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead { display: flex; flex-direction: column; gap: 18px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(30px, 5vw, 44px);
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 17px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 2px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin-top: 6px;
+  }
+  .fact { background: var(--surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+  .fact dt {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .fact dd { margin: 0; font-size: 13.5px; font-family: var(--mono); color: var(--ink); }
+
+  /* ---------- section scaffolding ---------- */
+
+  section { display: flex; flex-direction: column; gap: 20px; }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: 25px;
+    letter-spacing: -0.01em;
+    margin: 0;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--ink);
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  p { margin: 0; max-width: 68ch; }
+  .lede { color: var(--ink-soft); }
+
+  code, .path {
+    font-family: var(--mono);
+    font-size: 0.875em;
+    background: var(--surface-sunk);
+    padding: 1px 5px;
+    border-radius: 2px;
+    word-break: break-word;
+  }
+
+  /* ---------- verdict + tally ---------- */
+
+  .verdict {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--crit);
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .verdict p { max-width: 72ch; }
+  .verdict strong { font-weight: 600; }
+
+  .tally {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+    gap: 2px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+  }
+  .tally-cell {
+    background: var(--surface);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-top: 3px solid transparent;
+  }
+  .tally-cell .n {
+    font-family: var(--mono);
+    font-size: 27px;
+    font-weight: 600;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .tally-cell .lbl {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .t-crit { border-top-color: var(--crit); } .t-crit .n { color: var(--crit); }
+  .t-high { border-top-color: var(--high); } .t-high .n { color: var(--high); }
+  .t-med  { border-top-color: var(--med);  } .t-med  .n { color: var(--med);  }
+  .t-low  { border-top-color: var(--low);  } .t-low  .n { color: var(--low);  }
+
+  /* ---------- attack chain ---------- */
+
+  .chain { display: flex; flex-direction: column; gap: 0; }
+
+  .step {
+    display: grid;
+    grid-template-columns: 34px 1fr;
+    gap: 16px;
+    padding: 15px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    align-items: start;
+  }
+  .step:first-child { border-top: 1px solid var(--rule-soft); }
+
+  .step-n {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--surface);
+    background: var(--accent);
+    width: 26px;
+    height: 26px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    margin-top: 2px;
+  }
+  .step-body { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .step-call {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+    overflow-x: auto;
+    white-space: nowrap;
+    padding-bottom: 2px;
+  }
+  .step-call .verb { color: var(--accent); font-weight: 600; }
+  .step-note { font-size: 14px; color: var(--ink-soft); }
+  .step-note .none { color: var(--crit); font-weight: 600; }
+
+  .chain-out {
+    margin-top: 14px;
+    background: var(--crit-bg);
+    border-left: 4px solid var(--crit);
+    padding: 14px 18px;
+    font-size: 15px;
+    color: var(--ink);
+  }
+
+  /* ---------- findings ---------- */
+
+  .findings { display: flex; flex-direction: column; gap: 14px; }
+
+  .finding {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left-width: 4px;
+    border-left-style: solid;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .f-crit { border-left-color: var(--crit); }
+  .f-high { border-left-color: var(--high); }
+  .f-med  { border-left-color: var(--med);  }
+  .f-low  { border-left-color: var(--low);  }
+
+  .f-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+  .f-id {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    padding: 2px 7px;
+    border-radius: 2px;
+  }
+  .f-crit .f-id { background: var(--crit-bg); color: var(--crit); }
+  .f-high .f-id { background: var(--high-bg); color: var(--high); }
+  .f-med  .f-id { background: var(--med-bg);  color: var(--med);  }
+  .f-low  .f-id { background: var(--low-bg);  color: var(--low);  }
+
+  .f-title {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 16.5px;
+    margin: 0;
+    line-height: 1.3;
+    flex: 1 1 260px;
+    text-wrap: balance;
+  }
+
+  .f-loc {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    flex-basis: 100%;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .f-body { display: flex; flex-direction: column; gap: 9px; }
+  .f-row { display: grid; grid-template-columns: 78px 1fr; gap: 14px; align-items: start; }
+  .f-row dt {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 4px;
+  }
+  .f-row dd { margin: 0; font-size: 14.5px; line-height: 1.55; color: var(--ink-soft); }
+  .f-row dd strong { color: var(--ink); font-weight: 600; }
+
+  @media (max-width: 560px) {
+    .f-row { grid-template-columns: 1fr; gap: 2px; }
+    .f-row dt { padding-top: 0; }
+  }
+
+  /* ---------- tables ---------- */
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  th {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--surface-sunk);
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: none; }
+  td.claim { color: var(--ink); }
+  td.reality { color: var(--ink-soft); }
+
+  .verdict-chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 2px;
+    white-space: nowrap;
+    display: inline-block;
+  }
+  .v-no { background: var(--crit-bg); color: var(--crit); }
+  .v-part { background: var(--high-bg); color: var(--high); }
+  .v-yes { background: var(--good-bg); color: var(--good); }
+
+  /* ---------- roadmap ---------- */
+
+  .phases { display: flex; flex-direction: column; gap: 0; }
+  .phase {
+    display: grid;
+    grid-template-columns: 132px 1fr;
+    gap: 22px;
+    padding: 20px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .phase:last-child { border-bottom: 1px solid var(--rule); }
+  .phase-tag { display: flex; flex-direction: column; gap: 3px; }
+  .phase-tag .p-n {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .phase-tag .p-when { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .phase-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .phase-body h4 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: 19px;
+    margin: 0;
+    line-height: 1.25;
+  }
+  .phase-body ul { margin: 0; padding-left: 19px; display: flex; flex-direction: column; gap: 6px; }
+  .phase-body li { font-size: 14.5px; color: var(--ink-soft); line-height: 1.5; }
+  .phase-body li strong { color: var(--ink); font-weight: 600; }
+  .covers {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.03em;
+  }
+
+  @media (max-width: 620px) {
+    .phase { grid-template-columns: 1fr; gap: 10px; }
+  }
+
+  /* ---------- holds up ---------- */
+
+  .holds { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 2px; background: var(--rule); border: 1px solid var(--rule); }
+  .hold { background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .hold-t { font-weight: 600; font-size: 14.5px; color: var(--good); }
+  .hold-d { font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
+
+  /* ---------- code ---------- */
+
+  pre {
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  pre .cm { color: var(--muted); }
+
+  /* ---------- footer ---------- */
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  footer p { font-size: 13.5px; color: var(--muted); max-width: 72ch; }
+</style>
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow">Security assessment · Unified LLM Gateway</div>
+    <h1>Hardening the Unified Gateway for enterprise exposure</h1>
+    <p class="standfirst">A static review of the .NET&nbsp;8 gateway, its guardrail subsystem, and its management plane — 26 findings, an anonymous path to the organization's Bedrock credentials, and a phased plan to close them.</p>
+    <dl class="facts">
+      <div class="fact"><dt>Target</dt><dd>UnifiedGatewayV2</dd></div>
+      <div class="fact"><dt>Branch / commit</dt><dd>main · 133e4f5</dd></div>
+      <div class="fact"><dt>Method</dt><dd>Static source review</dd></div>
+      <div class="fact"><dt>Reviewed</dt><dd>2026-09-08</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <div class="verdict">
+      <p><strong>The data plane is well built. The management plane has no front door.</strong> Everything under <code>/gateway/*</code> does what an enterprise gateway should: cryptographically random keys stored as hashes, constant-time verification, ingress and egress guardrails, abuse clamps, a durable audit trail. Everything under <code>/api/*</code> — the endpoints that create applications, mint credentials, invoke models, and switch the guardrails off — accepts anonymous requests. Only <code>rotate-key</code> checks who is calling.</p>
+      <p>That single gap collapses the rest. An unauthenticated caller can mint a valid STS token for any registered application, which the data plane then honours — so the per-app key model protects nothing while port 80 is reachable. The README already flags this as known; this review treats it as the finding that gates every other one.</p>
+    </div>
+
+    <div class="tally">
+      <div class="tally-cell t-crit"><span class="n">5</span><span class="lbl">Critical</span></div>
+      <div class="tally-cell t-high"><span class="n">7</span><span class="lbl">High</span></div>
+      <div class="tally-cell t-med"><span class="n">10</span><span class="lbl">Medium</span></div>
+      <div class="tally-cell t-low"><span class="n">4</span><span class="lbl">Low</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The exposure chain</h2>
+    <p class="lede">These five calls need no credential at any point. They are steps in one sequence, not independent issues — each one is reachable because the previous one succeeded.</p>
+
+    <div class="chain">
+      <div class="step">
+        <span class="step-n">1</span>
+        <div class="step-body">
+          <div class="step-call"><span class="verb">POST</span> /api/apps</div>
+          <div class="step-note">Register an application naming any Bedrock model. Auth required: <span class="none">none</span>. Returns a live <code>ug_live_*</code> key.</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-n">2</span>
+        <div class="step-body">
+          <div class="step-call"><span class="verb">POST</span> /api/apps/{appId}/sts-token?durationSeconds=604800</div>
+          <div class="step-note">Mint a signed STS token for <em>any</em> application, including ones the attacker did not create. Auth required: <span class="none">none</span>. TTL is clamped at seven days, not at the request.</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-n">3</span>
+        <div class="step-body">
+          <div class="step-call"><span class="verb">POST</span> /gateway/{appId}/invoke &nbsp;·&nbsp; Authorization: Bearer ug_sts_…</div>
+          <div class="step-note">The data plane validates the signature, sees a matching <code>appId</code>, and authorizes. The per-app API key was never involved.</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-n">4</span>
+        <div class="step-body">
+          <div class="step-call"><span class="verb">PUT</span> /api/guardrails/config &nbsp;·&nbsp; {"enabled": false}</div>
+          <div class="step-note">Turn off PII, PCI, secrets, and injection screening for every tenant at once. Auth required: <span class="none">none</span>. Not persisted, not audited — it reverts on the next restart, leaving no trace of the window.</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-n">5</span>
+        <div class="step-body">
+          <div class="step-call"><span class="verb">POST</span> /api/apps &nbsp;·&nbsp; {"provider": "&lt;img src=x onerror=…&gt;"}</div>
+          <div class="step-note">Plant stored HTML in a dashboard field that is rendered unescaped, then wait for an operator to open the dashboard and read the master admin key out of their <code>localStorage</code>.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chain-out">Net effect: an anonymous caller reaches AWS Bedrock through the gateway's assumed IAM role, with guardrails disabled and no attributable identity in the audit trail — and can escalate to the master admin key by way of the operator's browser.</div>
+  </section>
+
+  <section>
+    <h2>Critical</h2>
+    <div class="findings">
+
+      <article class="finding f-crit">
+        <div class="f-head">
+          <span class="f-id">C1</span>
+          <h3 class="f-title">The entire management plane is unauthenticated</h3>
+          <div class="f-loc">Endpoints/DashboardEndpoints.cs:40, 56, 71, 79, 124, 150, 162, 195, 214</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Nine of the ten <code>/api/*</code> endpoints run no identity check. <code>IsAdminRequest</code> exists and is correct, but it is called from exactly one handler — <code>rotate-key</code> at line 88. The dashboard itself sends no credential on any of its calls, so the omission is by construction rather than oversight.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Anyone who can reach the port can enumerate every registered application, create and delete them, rewrite system prompts and model bindings, mint credentials, invoke models, and read the audit log. <strong>There is no server-side notion of an operator at all</strong> — no authentication scheme is registered, and <code>UseAuthentication</code> / <code>UseAuthorization</code> appear nowhere in the pipeline.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Apply authorization at the group, not per handler, so new endpoints inherit it by default. This is the one change that must land before any exposure beyond localhost.</dd></div>
+        </dl>
+        <pre><span class="cm">// Program.cs — register a scheme, then in DashboardEndpoints.cs:</span>
+var group = app.MapGroup("/api")
+    .WithTags("Dashboard &amp; Management")
+    .RequireAuthorization("PlatformAdmin")   <span class="cm">// deny-by-default for the whole group</span>
+    .RequireRateLimiting("management");</pre>
+      </article>
+
+      <article class="finding f-crit">
+        <div class="f-head">
+          <span class="f-id">C2</span>
+          <h3 class="f-title">Anonymous STS minting voids the data-plane auth model</h3>
+          <div class="f-loc">Endpoints/DashboardEndpoints.cs:124 → Services/ApplicationRegistryService.cs:427</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>POST /api/apps/{appId}/sts-token</code> calls <code>MintStsTokenDirectAsync</code>, which signs a token unconditionally — it never verifies a caller and never checks that the requester owns the app. <code>AuthenticateAppAsync</code> on the data plane accepts that token as proof of identity.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Every control built on the per-app API key — hashing, constant-time comparison, rotation — is bypassable without touching a key. <strong>The hardened data plane inherits the trust level of the unprotected management plane</strong>, which is the lower of the two.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Covered by C1's group-level authorization, but treat minting as a distinct privilege: a token for app X should require either platform-admin rights or proven ownership of X, and the requested TTL should be validated against a per-app policy rather than silently clamped to the seven-day ceiling in <code>SecurityService.cs:109</code>.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-crit">
+        <div class="f-head">
+          <span class="f-id">C3</span>
+          <h3 class="f-title">Unauthenticated callers can spend against the organization's AWS account</h3>
+          <div class="f-loc">Endpoints/DashboardEndpoints.cs:56, 150 · Services/STSService.cs:114</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>POST /api/apps/{appId}/test</code> routes straight into <code>IModelRouter</code> with no credential check and no rate-limit attribute. Paired with anonymous app creation, a caller chooses the model and then invokes it.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>A classic confused deputy: the gateway holds the assumed-role credentials and will exercise them for anybody. Exposure is <strong>unbounded Bedrock spend, model-access abuse under the organization's IAM identity, and inference logged to the company's CloudTrail with no attributable caller</strong>. This is likely the highest-dollar risk in the review.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Authorize the endpoint, and add a per-app token budget enforced independently of request-rate limiting — requests-per-minute does not bound cost when a single request can request the token ceiling.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-crit">
+        <div class="f-head">
+          <span class="f-id">C4</span>
+          <h3 class="f-title">Guardrails can be disabled globally, anonymously, without a trace</h3>
+          <div class="f-loc">Endpoints/DashboardEndpoints.cs:214 → Services/GuardrailService.cs:29</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>PUT /api/guardrails/config</code> replaces the whole options object on a singleton with no authorization, no validation, and no audit entry. Sending <code>{"enabled": false}</code> disables PII, PCI, secrets, and injection screening for every tenant.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>The compliance control the product is sold on can be switched off by an unauthenticated request. Because the change lives only in memory, <strong>it disappears on restart</strong> — so a regulated organization would see redaction resume and have no record that it ever stopped. That is worse than a persisted change: it defeats after-the-fact investigation.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Require platform-admin rights, write a policy-change record to the audit trail (actor, before/after, timestamp) before applying it, persist the change so restarts don't mask it, and validate the payload — a partial body currently nulls out whole detector groups.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-crit">
+        <div class="f-head">
+          <span class="f-id">C5</span>
+          <h3 class="f-title">Stored XSS in the dashboard leads to the master admin key</h3>
+          <div class="f-loc">wwwroot/js/app.js:367, 383–385, 490, 741 · key stored at app.js:69</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Most fields are escaped, but four sinks are not. <code>${app.provider.toUpperCase()}</code> is interpolated raw at lines 367 and 490 — uppercasing does not neutralise markup, since HTML tag and attribute names are case-insensitive. <code>${app.model}</code> is raw at 490. And <code>appId</code> is interpolated into <code>onclick="selectAppForTest('…')"</code> handlers at 383–385, where <code>Slugify</code> (<code>ApplicationRegistryService.cs:670</code>) strips spaces and underscores but leaves quotes intact.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Anonymous app creation (C1) means an attacker controls those values. The dashboard keeps the master admin key in <code>localStorage</code> under <code>ug_universal_admin_key</code>, and there is no CSP to contain injected script. <strong>The chain runs from an anonymous HTTP request to the master credential the moment an operator opens the dashboard.</strong></dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Escape all four sinks; build the action buttons with <code>addEventListener</code> and a <code>dataset</code> value rather than inline <code>onclick</code> strings; restrict <code>appId</code> to <code>[a-z0-9-]</code> at the API boundary; move the admin credential out of <code>localStorage</code> into a session-scoped store or an httpOnly cookie once real sign-in exists; add a CSP as defence in depth.</dd></div>
+        </dl>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>High</h2>
+    <div class="findings">
+
+      <article class="finding f-high">
+        <div class="f-head">
+          <span class="f-id">H1</span>
+          <h3 class="f-title">A working admin key ships in source control, and nothing refuses to boot on it</h3>
+          <div class="f-loc">appsettings.json · Models/GatewayOptions.cs:59 · appsettings.Development.json</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>ug-admin-secret-key-change-in-production</code> is committed in <code>appsettings.json</code>, with <code>ug-admin-default-change-in-prod</code> as the compiled-in default and <code>ug-dev-admin-key</code> in the development profile. Only the production file uses a deploy-time placeholder. Separately, <code>EnforceAppApiKey</code> is a single flag that disables app authentication entirely (<code>ApplicationRegistryService.cs:410</code>).</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Any deployment that inherits the base configuration is protected by a published credential. A misconfigured environment variable silently falls back to it rather than failing.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Add a startup guard that throws when the environment is not Development and the admin key is empty, a known default, or under a minimum entropy bar. Do the same for <code>EnforceAppApiKey == false</code>. Fail fast and loudly; a gateway that starts insecure is worse than one that refuses to start.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-high">
+        <div class="f-head">
+          <span class="f-id">H2</span>
+          <h3 class="f-title">CORS defaults to any origin</h3>
+          <div class="f-loc">Program.cs:76–90 · appsettings.json, appsettings.Development.json</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>AllowedCorsOrigins</code> is <code>["*"]</code> in both the base and development configuration, taking the <code>AllowAnyOrigin()</code> branch. Production correctly names two origins.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Any web page a staff member visits can script the management API. Wildcard CORS blocks credentialed requests, but the management plane needs no credentials (C1) — so the usual mitigation does not apply here.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Remove the wildcard branch entirely and treat an empty allow-list as "no cross-origin access". Wildcard CORS should not be reachable through configuration on a service that fronts cloud credentials.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-high">
+        <div class="f-head">
+          <span class="f-id">H3</span>
+          <h3 class="f-title">No transport security is enforced</h3>
+          <div class="f-loc">Program.cs (pipeline, lines 167–196) · architecture.md:113</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>The pipeline has no <code>UseHttpsRedirection</code> and no <code>UseHsts</code>; <code>launchSettings.json</code> binds plain HTTP alongside HTTPS, and the IIS <code>web.config</code> sets no HTTPS-only binding. The threat model claims "Mandatory TLS for all external and cloud communication."</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd><code>ug_live_*</code> keys, STS bearer tokens, and every prompt — the data the guardrails exist to protect — can traverse the network in clear text. On-premise deployment is not a mitigation; internal networks are where credential harvesting happens.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Add HSTS and HTTPS redirection outside Development, and enforce it at the IIS binding so misconfiguration cannot re-open a plaintext listener.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-high">
+        <div class="f-head">
+          <span class="f-id">H4</span>
+          <h3 class="f-title">STS tokens cannot be revoked, and rotation does not invalidate them</h3>
+          <div class="f-loc">Services/SecurityService.cs:101–138 · Services/ApplicationRegistryService.cs:381</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Tokens carry a <code>jti</code>, but nothing records or checks it. Validation is signature plus expiry only. <code>RotateApiKeyAsync</code> overwrites the key hash — correctly invalidating the long-term key — while every STS token already minted from it keeps working. The token does not bind to the key version it was issued against.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd><strong>There is no way to respond to a compromise.</strong> The documented incident response — rotate the key — leaves valid credentials in the attacker's hands for up to seven days, and an admin token minted with <code>appId: "*"</code> is a master credential for that entire window.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Stamp a key generation number into the payload and reject tokens whose generation is stale, giving rotation immediate effect. Add a <code>jti</code> denylist (in-memory plus persisted, bounded by max TTL) for targeted revocation. Cut the default TTL to 15 minutes with a one-hour ceiling; seven days is a long-lived credential wearing a short-lived credential's name.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-high">
+        <div class="f-head">
+          <span class="f-id">H5</span>
+          <h3 class="f-title">Rate limiting misses token issuance and the whole management plane</h3>
+          <div class="f-loc">Program.cs:106–128 · Endpoints/GatewayEndpoints.cs:19, 65</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>The <code>per-app</code> policy is well designed — partitioned by hashed credential, falling back to appId then IP — but <code>RequireRateLimiting</code> is attached to only two endpoints. <code>/gateway/sts/token</code>, <code>/gateway/sts/inspect</code>, <code>/gateway/health</code>, and every <code>/api/*</code> route are unlimited.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd><code>/gateway/sts/token</code> is the ideal brute-force oracle: it accepts a key with no appId and searches every registered app for a match (<code>ApplicationRegistryService.cs:510</code>), returning a token on success. Unlimited attempts against it, plus unlimited <code>/api/apps/{id}/test</code> invocations, make both credential guessing and cost exhaustion cheap.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Set a global limiter as the floor and override per route. Give credential-issuing endpoints a much tighter limit than invocation endpoints, and add exponential backoff or lockout on repeated authentication failures from one partition.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-high">
+        <div class="f-head">
+          <span class="f-id">H6</span>
+          <h3 class="f-title">Guardrail regexes are backtracking-prone with no match timeout</h3>
+          <div class="f-loc">Services/GuardrailService.cs:281 and all GeneratedRegex declarations</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>The credit-card candidate pattern <code>\b(?:\d[ -]*?){13,19}\b</code> combines a lazy inner quantifier with a bounded outer repetition — the shape that backtracks combinatorially on long digit-and-separator runs. No pattern in the file sets a <code>matchTimeout</code> or uses <code>RegexOptions.NonBacktracking</code>, and <code>MaxInputCharacters</code> admits 100,000 characters.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>A crafted prompt within the accepted size can pin a CPU core inside the guardrail engine. Because screening runs synchronously before routing, <strong>a handful of concurrent requests can stall the gateway for every tenant</strong> — and reaching it needs no credential via <code>/api/guardrails/test</code>.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Set a match timeout (100–250 ms) on every pattern and treat a timeout as a violation rather than a pass, so the failure mode stays closed. Move patterns without backreferences to <code>NonBacktracking</code>. Lower the scanned-input ceiling, or chunk long inputs. Add a regression test that feeds a pathological string and asserts a bounded runtime.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-high">
+        <div class="f-head">
+          <span class="f-id">H7</span>
+          <h3 class="f-title">The Data Protection key ring is the admin-token forging key</h3>
+          <div class="f-loc">Program.cs:22–32 · Services/SecurityService.cs:19, 133</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>STS tokens are signed with an <code>IDataProtector</code> whose key ring sits in <code>dataprotection-keys/</code> beside the binaries, protected by machine-scoped DPAPI. Machine scope means any account on the host can unprotect it.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Anyone with a foothold on the server — not just the app-pool identity — can forge a token with <code>isAdmin: true</code> and <code>appId: "*"</code>, which every admin check in the codebase honours. Operationally, DPAPI-bound keys also do not move between hosts: <strong>a rebuild or a second node silently invalidates every issued token</strong>, and the failure surfaces as unexplained 401s rather than a clear error.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Move the key ring off the application directory and restrict its ACL to the app-pool identity alone. For multi-node or DR, protect it with an X.509 certificate from the machine store rather than DPAPI. Longer term, sign tokens asymmetrically with a key held in Key Vault or KMS so the signing key never lands on the web tier at all (Phase 2).</dd></div>
+        </dl>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Medium</h2>
+    <div class="findings">
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M1</span>
+          <h3 class="f-title">The audit trail records no caller identity, and no management actions at all</h3>
+          <div class="f-loc">Models/GatewayMetrics.cs:6–57 · Services/ModelRouter.cs:394</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>RequestLogEntry</code> captures app, model, latency, tokens, and guardrail outcome — but no client IP, no key prefix, no STS <code>jti</code>, no user or session identifier. <code>UniversalRequest</code> defines a <code>traceId</code> that is never propagated into the log. Create, update, delete, rotate, and guardrail-config changes write nothing to the trail.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>The trail answers "what was invoked" but not "by whom", which is what a repudiation control needs. The threat model claims traceId correlation that does not exist. Privileged actions are invisible to forensics.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Add actor fields (key prefix or subject, <code>jti</code>, source IP, traceId) to the entry, and emit a distinct management-action record for every state change.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M2</span>
+          <h3 class="f-title">Blocked and failed requests return HTTP 200</h3>
+          <div class="f-loc">Endpoints/GatewayEndpoints.cs:119, 176 · architecture.md (enforcement modes table)</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Both invoke endpoints wrap every outcome in <code>Results.Ok</code>. A guardrail block, a provider failure, an oversized prompt, and a successful completion are all 200s distinguished only by an <code>error</code> object in the body. The documentation states that Block returns 422.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Client SDKs, load balancers, and monitoring that key on status codes will read blocked and failed requests as successes. Availability and policy-enforcement metrics are quietly wrong, and integrators who follow the documented contract build a bug.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Map error codes to status: 422 for guardrail blocks, 413 for oversized input, 502/504 for provider failures, 404 for unknown apps. Version the change and tell integrators, since it alters an existing contract.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M3</span>
+          <h3 class="f-title">Anonymous information disclosure</h3>
+          <div class="f-loc">Endpoints/DashboardEndpoints.cs:162, 195 · Endpoints/GatewayEndpoints.cs:185</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>/api/credentials/status</code> returns the assumed-role ARN masked to first and last twelve characters — enough to expose the role name tail and account fragment — plus expiry and last error. <code>/api/metrics</code> returns recent invocation logs including backend error text. <code>/gateway/health</code> reveals which local model backends are reachable.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Free reconnaissance of AWS account structure, internal topology, and failure modes ahead of a targeted attempt.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Authorize all three. Split health into an unauthenticated liveness probe that returns only up/down, and an authenticated detail view.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M4</span>
+          <h3 class="f-title">The master key authenticates as every application</h3>
+          <div class="f-loc">Services/ApplicationRegistryService.cs:447 · 475</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>AuthenticateAppAsync</code> accepts the admin key as a valid credential for any app, and <code>IssueStsTokenForAppAsync</code> will mint an admin token scoped to <code>"*"</code>. One static string is the highest privilege in the system, used interactively from a browser.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>No separation of duty and no least privilege: the credential used for routine dashboard work is the same one that can impersonate any tenant. A single leak is total compromise with no partial containment.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Separate operator identity (people, via SSO) from service identity (applications, via keys). Keep a break-glass admin key offline, and require a named human actor for anything a person does interactively.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M5</span>
+          <h3 class="f-title">Registry writes are non-atomic — a crash can erase every application</h3>
+          <div class="f-loc">Services/ApplicationRegistryService.cs:640–668</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Persistence serialises the full registry and calls <code>File.WriteAllText</code> over the live file. A crash, a full disk, or a recycle mid-write truncates it. Startup then deserialises a partial file, hits the catch block, and reseeds three default applications.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd><strong>Availability and integrity risk for the whole tenant list</strong>: every registered app and key hash lost, replaced by defaults with freshly generated keys nobody holds. There is no backup and no write-ahead. The in-process <code>SemaphoreSlim</code> also does not coordinate across IIS worker processes, so an app-pool recycle overlap can interleave writes.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Write to a temp file and <code>File.Replace</code> for atomic swap; never reseed defaults when an existing registry fails to parse — fail startup instead, so a corrupt file is investigated rather than overwritten. Phase 3 moves this to a database.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M6</span>
+          <h3 class="f-title">The STS <code>scope</code> claim is issued but never enforced</h3>
+          <div class="f-loc">Services/SecurityService.cs:124 · Services/ApplicationRegistryService.cs:427–443</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Callers set a scope, it is signed into the payload and echoed back on inspect, but no authorization path reads it. Only <code>IsAdmin</code> and <code>AppId</code> affect decisions.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>A token issued as <code>"read"</code> can invoke. Worse than a missing feature: the API presents a restriction the runtime does not apply, so operators will rely on it.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Enforce scope at each endpoint, or drop the claim until it is enforced. A security control that exists only in the response body is a liability.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M7</span>
+          <h3 class="f-title">Swagger is exposed in Staging and Test</h3>
+          <div class="f-loc">Program.cs:171</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>The UI is served whenever the environment is Development, Staging, or Test — environments that are frequently network-reachable and often share production-shaped data.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>A complete, browsable map of the unauthenticated management surface.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Development only, or authorize the Swagger routes alongside the endpoints they document.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M8</span>
+          <h3 class="f-title">No security response headers</h3>
+          <div class="f-loc">Program.cs (pipeline) — noted as a known gap in README.md:105</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>No <code>Content-Security-Policy</code>, <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code>, <code>Referrer-Policy</code>, or <code>Permissions-Policy</code> is emitted.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Nothing constrains injected script (C5), the dashboard can be framed for clickjacking, and responses are open to MIME sniffing.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Add a small header middleware ahead of static files. A strict CSP is achievable here because the dashboard loads no third-party assets.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M9</span>
+          <h3 class="f-title"><code>AllowedHosts</code> is a wildcard</h3>
+          <div class="f-loc">appsettings.json</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>"AllowedHosts": "*"</code> with no production override disables host filtering.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Host-header manipulation and DNS-rebinding reach a service that binds to all interfaces.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Name the expected hostnames per environment.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-med">
+        <div class="f-head">
+          <span class="f-id">M10</span>
+          <h3 class="f-title">Secrets live in configuration files rather than a secret store</h3>
+          <div class="f-loc">appsettings*.json · deploy/iis/install.ps1</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>The admin key is a plain configuration value. Production uses a deploy-time placeholder, which is the right instinct, but there is no integration with a managed secret store and no rotation mechanism for the admin credential itself.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>The highest-value credential sits in a file readable by anyone with host access or a backup copy, with no rotation path and no access log.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Source it from AWS Secrets Manager or Azure Key Vault through a configuration provider, cache with a TTL, and support rotation without a restart. Store a hash, not the key, so the running process never holds the plaintext.</dd></div>
+        </dl>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Low</h2>
+    <div class="findings">
+
+      <article class="finding f-low">
+        <div class="f-head">
+          <span class="f-id">L1</span>
+          <h3 class="f-title">The sign-off document claims controls the code does not implement</h3>
+          <div class="f-loc">architecture.md §3, §5</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Five specific claims do not hold — detailed in the table below.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Ranked low for exploitability, but it is the finding most likely to cause real harm in an enterprise setting: <strong>a security review that is trusted and wrong is how gaps get formally accepted.</strong> The README is notably more honest than architecture.md.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Reconcile the document with the code and mark unimplemented controls as planned. Each row should cite the code that implements it, not the file that mentions it.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-low">
+        <div class="f-head">
+          <span class="f-id">L2</span>
+          <h3 class="f-title"><code>appId</code> accepts an unrestricted character set</h3>
+          <div class="f-loc">Services/ApplicationRegistryService.cs:670</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd><code>Slugify</code> lowercases and swaps spaces and underscores for hyphens. Quotes, slashes, angle brackets, and control characters pass through into an identifier used in URLs, HTML attributes, and log lines.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Supplies the injection vector in C5 and makes log entries spoofable.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Allow-list <code>[a-z0-9-]</code>, cap the length, and reject rather than silently transform — a caller should know the id it will be addressed by.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-low">
+        <div class="f-head">
+          <span class="f-id">L3</span>
+          <h3 class="f-title">Backend exception text is returned to callers</h3>
+          <div class="f-loc">Services/ModelRouter.cs:196, 258 · Services/LocalModelService.cs:58</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>Raw <code>ex.Message</code> values from Bedrock and local backends are placed in the client-facing error payload, and both primary and fallback messages are concatenated on dual failure.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Leaks internal hostnames, ARNs, and AWS error detail to any caller.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Return a stable error code and a correlation id; log the detail server-side against that id.</dd></div>
+        </dl>
+      </article>
+
+      <article class="finding f-low">
+        <div class="f-head">
+          <span class="f-id">L4</span>
+          <h3 class="f-title">No supply-chain or secret scanning</h3>
+          <div class="f-loc">UnifiedGatewayV2.csproj · repository root</div>
+        </div>
+        <dl class="f-body">
+          <div class="f-row"><dt>What</dt><dd>No <code>NuGetAudit</code> setting, no lock file, no CI pipeline in the repository. Package versions are pinned to 2024 releases across the AWS SDK, Swashbuckle, and Polly.</dd></div>
+          <div class="f-row"><dt>Impact</dt><dd>Vulnerable dependencies age in silently, and a committed credential (H1) has nothing watching for it.</dd></div>
+          <div class="f-row"><dt>Fix</dt><dd>Enable <code>NuGetAudit</code> with a build-failing threshold, commit a lock file, and add dependency and secret scanning to CI.</dd></div>
+        </dl>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Documented controls versus implemented controls</h2>
+    <p class="lede">Rows from the STRIDE analysis and sign-off table in <code>architecture.md</code> that a reader would reasonably take as assurance.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Documented claim</th><th>What the code does</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="claim">Mandatory TLS for all external communication</td>
+            <td class="reality">No HTTPS redirection or HSTS in the pipeline; plain HTTP binding in launch settings. AWS SDK calls are TLS, so the cloud leg holds.</td>
+            <td><span class="verdict-chip v-no">Not implemented</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Unique <code>traceId</code> correlation across requests</td>
+            <td class="reality"><code>traceId</code> exists on the request model but is never read, propagated, or logged.</td>
+            <td><span class="verdict-chip v-no">Not implemented</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Polly circuit breaking &amp; retry policies</td>
+            <td class="reality">Retry with exponential backoff is configured (<code>Program.cs:35</code>). No circuit breaker anywhere.</td>
+            <td><span class="verdict-chip v-part">Partial</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Non-root container execution (<code>appuser</code>, UID 1000)</td>
+            <td class="reality">No Dockerfile in the repository; deployment is IIS in-process.</td>
+            <td><span class="verdict-chip v-no">Not implemented</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Block mode aborts with 422 Unprocessable Entity</td>
+            <td class="reality">Returns HTTP 200 with an error object in the body (M2).</td>
+            <td><span class="verdict-chip v-no">Not implemented</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Strict app isolation on <code>/gateway/{appId}/invoke</code></td>
+            <td class="reality">Correct within the data plane — but any caller can mint a token for any app via the open management plane (C2).</td>
+            <td><span class="verdict-chip v-part">Bypassable</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Configurable rate limiting per minute</td>
+            <td class="reality">Well-built partitioned limiter, attached to two endpoints only (H5).</td>
+            <td><span class="verdict-chip v-part">Partial</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Egress guardrails, fail closed</td>
+            <td class="reality">Accurate. An exception in output scanning suppresses the response (<code>ModelRouter.cs:329</code>).</td>
+            <td><span class="verdict-chip v-yes">Confirmed</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Keys hashed, constant-time verification</td>
+            <td class="reality">Accurate. SHA-256 over a 256-bit CSPRNG key, compared with <code>FixedTimeEquals</code>.</td>
+            <td><span class="verdict-chip v-yes">Confirmed</span></td>
+          </tr>
+          <tr>
+            <td class="claim">Persistent append-only audit trail</td>
+            <td class="reality">Present and restart-safe, but records no caller identity and no management actions (M1).</td>
+            <td><span class="verdict-chip v-part">Partial</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Remediation roadmap</h2>
+    <p class="lede">Ordered by dependency, not just severity. Phase 0 is what has to be true before this service is reachable from anywhere but a developer's machine; later phases are what "enterprise grade" means once the obvious holes are shut.</p>
+
+    <div class="phases">
+
+      <div class="phase">
+        <div class="phase-tag">
+          <span class="p-n">Phase 0</span>
+          <span class="p-when">Days</span>
+        </div>
+        <div class="phase-body">
+          <h4>Close the open door</h4>
+          <ul>
+            <li><strong>Authorize the <code>/api</code> group</strong> with <code>RequireAuthorization</code> so it is deny-by-default and new endpoints inherit it — the existing <code>IsAdminRequest</code> logic works as an interim scheme.</li>
+            <li><strong>Refuse to start</strong> on a default, empty, or low-entropy admin key outside Development, and on <code>EnforceAppApiKey: false</code>.</li>
+            <li><strong>Remove the wildcard CORS branch</strong> and set real origins in every environment file.</li>
+            <li><strong>Enforce TLS</strong> — HSTS plus HTTPS redirection in the pipeline, HTTPS-only at the IIS binding.</li>
+            <li><strong>Escape the four XSS sinks</strong>, replace inline <code>onclick</code> with delegated handlers, and constrain <code>appId</code> to <code>[a-z0-9-]</code>.</li>
+            <li><strong>Add regex match timeouts</strong> that fail closed, and a global rate-limit floor.</li>
+          </ul>
+          <div class="covers">Closes C1 · C2 · C3 · C4 · C5 · H1 · H2 · H3 · H5 · H6</div>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-tag">
+          <span class="p-n">Phase 1</span>
+          <span class="p-when">2–4 weeks</span>
+        </div>
+        <div class="phase-body">
+          <h4>Real identity for operators</h4>
+          <ul>
+            <li><strong>OIDC sign-in for the management plane</strong> against the corporate IdP (Entra ID or equivalent). People authenticate as people; applications keep API keys for the data plane.</li>
+            <li><strong>Roles as authorization policies</strong> — <code>PlatformAdmin</code>, <code>AppOwner</code>, <code>Auditor</code> — so reading metrics does not require the rights to mint credentials.</li>
+            <li><strong>Per-app ownership</strong> on <code>AppConfig</code>, so an <code>AppOwner</code> sees and rotates only their own applications. This is what makes the gateway genuinely multi-tenant rather than shared-admin.</li>
+            <li><strong>Break-glass admin key</strong> kept offline, alerting loudly whenever it is used.</li>
+          </ul>
+          <div class="covers">Closes M4 · hardens C1</div>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-tag">
+          <span class="p-n">Phase 2</span>
+          <span class="p-when">2–3 weeks</span>
+        </div>
+        <div class="phase-body">
+          <h4>Credential lifecycle you can actually operate</h4>
+          <ul>
+            <li><strong>Asymmetric token signing</strong> — standard JWT signed by a key in Key Vault or KMS, so the web tier never holds signing material and tokens survive host rebuilds.</li>
+            <li><strong>Revocation</strong> — a <code>jti</code> denylist bounded by max TTL, plus a key-generation claim so rotation invalidates outstanding tokens immediately.</li>
+            <li><strong>Sane TTLs</strong> — 15-minute default, one-hour ceiling, with the seven-day path removed.</li>
+            <li><strong>Dual-key rotation</strong> — accept the previous key hash for a short overlap so rotation stops being an outage.</li>
+            <li><strong>Enforce <code>scope</code></strong> at every endpoint, or remove the claim.</li>
+          </ul>
+          <div class="covers">Closes H4 · H7 · M6</div>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-tag">
+          <span class="p-n">Phase 3</span>
+          <span class="p-when">3–4 weeks</span>
+        </div>
+        <div class="phase-body">
+          <h4>Durable state and real observability</h4>
+          <ul>
+            <li><strong>Move the registry to SQL Server or Postgres</strong> with transactional writes, encryption at rest, and backups — removing the whole-registry-loss failure mode and making horizontal scale possible.</li>
+            <li><strong>Attributable, immutable audit</strong> — actor, source IP, token <code>jti</code>, traceId on every entry, and a record for every management action, written append-only.</li>
+            <li><strong>Ship to the SIEM</strong> over OpenTelemetry, with alerts on guardrail-policy changes, admin-key use, authentication-failure spikes, and token-budget breaches.</li>
+            <li><strong>Interim</strong>: atomic temp-file-and-replace writes, and never reseed defaults over an unparseable registry.</li>
+          </ul>
+          <div class="covers">Closes M1 · M5 · completes M3</div>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-tag">
+          <span class="p-n">Phase 4</span>
+          <span class="p-when">2 weeks</span>
+        </div>
+        <div class="phase-body">
+          <h4>Runtime hardening</h4>
+          <ul>
+            <li><strong>Security headers</strong> including a strict CSP — straightforward here, since the dashboard loads no third-party assets.</li>
+            <li><strong>Cost controls</strong> — per-app daily token budgets and concurrency caps enforced separately from request-rate limits, since one request can consume the entire token ceiling.</li>
+            <li><strong>Correct status codes</strong> — 422 on guardrail block, 413 on oversized input, 502/504 on provider failure; version and communicate the change.</li>
+            <li><strong>Circuit breakers</strong> on both provider paths, and generic error responses carrying a correlation id instead of backend exception text.</li>
+          </ul>
+          <div class="covers">Closes M2 · M8 · M9 · L3 · completes C3</div>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-tag">
+          <span class="p-n">Phase 5</span>
+          <span class="p-when">Ongoing</span>
+        </div>
+        <div class="phase-body">
+          <h4>Assurance</h4>
+          <ul>
+            <li><strong>CI gates</strong> — <code>NuGetAudit</code> failing the build on known vulnerabilities, a committed lock file, secret scanning, and SAST on every pull request.</li>
+            <li><strong>A test per control</strong>, not just per detector: assert that <code>/api</code> rejects anonymous callers, that rotation invalidates outstanding tokens, that a pathological prompt returns within a bounded time.</li>
+            <li><strong>Reconcile <code>architecture.md</code></strong> with the code and keep it honest, citing implementing code for each row.</li>
+            <li><strong>External penetration test</strong> once Phase 2 lands, and a threat-model refresh covering the management plane, which the current STRIDE analysis does not address.</li>
+          </ul>
+          <div class="covers">Closes L1 · L4</div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>What already holds up</h2>
+    <p class="lede">Worth stating plainly, because the remediation plan should not disturb any of it.</p>
+    <div class="holds">
+      <div class="hold">
+        <span class="hold-t">Key generation and storage</span>
+        <span class="hold-d">256-bit CSPRNG keys, stored only as SHA-256 hashes, verified with <code>FixedTimeEquals</code>. Plaintext is returned exactly once on creation and rotation.</span>
+      </div>
+      <div class="hold">
+        <span class="hold-t">Egress guardrails fail closed</span>
+        <span class="hold-d">If output scanning throws, the model response is suppressed rather than returned. The right default, and easy to get backwards.</span>
+      </div>
+      <div class="hold">
+        <span class="hold-t">Detector quality</span>
+        <span class="hold-d">Luhn validation on card candidates and SSA assignment rules on SSNs — real validation rather than pattern-matching that floods reviewers with false positives.</span>
+      </div>
+      <div class="hold">
+        <span class="hold-t">Abuse clamps</span>
+        <span class="hold-d">Input-character limit, token ceiling, and request-body cap applied at both Kestrel and IIS. Correct layering.</span>
+      </div>
+      <div class="hold">
+        <span class="hold-t">Rate-limit partitioning</span>
+        <span class="hold-d">Hashes the presented credential rather than keying on it, falling back to appId then IP. The design is sound; it just isn't applied widely enough.</span>
+      </div>
+      <div class="hold">
+        <span class="hold-t">Credential refresh</span>
+        <span class="hold-d">Proactive STS refresh ahead of expiry, with a buffer, a lock, and retention of working credentials when a refresh fails.</span>
+      </div>
+      <div class="hold">
+        <span class="hold-t">Audit durability</span>
+        <span class="hold-d">JSON Lines per UTC day, rehydrated at startup, retention-pruned, and tolerant of a torn trailing line.</span>
+      </div>
+      <div class="hold">
+        <span class="hold-t">Repository hygiene</span>
+        <span class="hold-d">The key ring, the app registry, and the audit directory are all correctly gitignored. Only the sample admin key slipped through.</span>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <h3>Scope and method</h3>
+    <p>Static review of all C# sources, configuration, dashboard assets, and deployment scripts on <code>main</code> at commit <code>133e4f5</code>. The application was not built, run, or tested dynamically, and no exploitation was attempted — the attack chain is derived from reading the code paths, and each step should be confirmed against a running instance before it is treated as proven or as ruled out.</p>
+    <p>Line references point at commit <code>133e4f5</code> and will drift as the code changes. Findings in <code>bin/</code>, <code>obj/</code>, and <code>.vs/</code> were out of scope. Severity reflects impact in a network-reachable enterprise deployment; a gateway bound only to localhost carries materially less risk from the Critical findings, though none of them become acceptable.</p>
+  </footer>
+
+</div>

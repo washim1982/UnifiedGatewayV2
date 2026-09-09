@@ -2,16 +2,18 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
+using UnifiedGateway.Services.Cloud;
 
 namespace UnifiedGateway.Services;
 
-public class ApplicationRegistryService : IApplicationRegistryService
+public partial class ApplicationRegistryService : IApplicationRegistryService
 {
     private readonly ConcurrentDictionary<string, AppConfig> _apps = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<RequestLogEntry> _recentLogs = new();
     private const int MaxLogHistory = 500;
 
     private readonly ISecurityService _securityService;
+    private readonly IAdminCredentialService _adminCredentials;
     private readonly GatewayOptions _options;
     private readonly ILogger<ApplicationRegistryService> _logger;
     private readonly SemaphoreSlim _fileLock = new(1, 1);
@@ -33,10 +35,12 @@ public class ApplicationRegistryService : IApplicationRegistryService
 
     public ApplicationRegistryService(
         ISecurityService securityService,
+        IAdminCredentialService adminCredentials,
         IOptions<GatewayOptions> options,
         ILogger<ApplicationRegistryService> logger)
     {
         _securityService = securityService;
+        _adminCredentials = adminCredentials;
         _options = options.Value;
         _logger = logger;
 
@@ -118,6 +122,7 @@ public class ApplicationRegistryService : IApplicationRegistryService
             foreach (var line in File.ReadLines(file))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
+                if (line.Contains("\"kind\":\"management\"", StringComparison.Ordinal)) continue;
                 try
                 {
                     var entry = JsonSerializer.Deserialize<RequestLogEntry>(line, AuditJsonOpts);
@@ -189,8 +194,13 @@ public class ApplicationRegistryService : IApplicationRegistryService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error loading registry from disk, seeding defaults.");
-            SeedDefaultApps();
+            // Do not reseed over a registry that exists but failed to parse: that would
+            // replace every real application and key hash with fresh defaults nobody holds.
+            // Fail startup instead, so a corrupt file is investigated rather than overwritten.
+            _logger.LogCritical(ex, "Registry at {Path} exists but could not be read.", _registryFilePath);
+            throw new InvalidOperationException(
+                $"Application registry '{_registryFilePath}' could not be read. " +
+                "Restore it from backup or move it aside to start with a fresh registry.", ex);
         }
     }
 
@@ -313,7 +323,12 @@ public class ApplicationRegistryService : IApplicationRegistryService
         await PersistRegistryToFileAsync();
 
         // Mint initial ready-to-use 1-hour STS temporary token
-        var (stsToken, stsExpiresAt) = _securityService.IssueAppStsToken(cleanAppId, TimeSpan.FromHours(1), "invoke", false);
+        var (stsToken, stsExpiresAt) = await _securityService.IssueAppStsTokenAsync(
+            cleanAppId,
+            TimeSpan.FromSeconds(_options.Security.DefaultStsTokenLifetimeSeconds),
+            "invoke",
+            isAdmin: false,
+            cancellationToken: cancellationToken);
 
         return new CreateAppResponse
         {
@@ -322,7 +337,7 @@ public class ApplicationRegistryService : IApplicationRegistryService
             EndpointUrl = $"/gateway/{cleanAppId}/invoke",
             StsToken = stsToken,
             StsExpiresAt = stsExpiresAt,
-            StsDurationSeconds = 3600
+            StsDurationSeconds = _options.Security.DefaultStsTokenLifetimeSeconds
         };
     }
 
@@ -400,21 +415,21 @@ public class ApplicationRegistryService : IApplicationRegistryService
         return rawKey;
     }
 
-    public Task<(bool isValid, AppConfig? app)> AuthenticateAppAsync(string appId, string apiKey, CancellationToken cancellationToken = default)
+    public async Task<(bool isValid, AppConfig? app)> AuthenticateAppAsync(string appId, string apiKey, CancellationToken cancellationToken = default)
     {
         if (!_apps.TryGetValue(appId, out var app) || !app.IsActive)
         {
-            return Task.FromResult<(bool, AppConfig?)>((false, null));
+            return (false, null);
         }
 
         if (!_options.Security.EnforceAppApiKey)
         {
-            return Task.FromResult<(bool, AppConfig?)>((true, app));
+            return (true, app);
         }
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            return Task.FromResult<(bool, AppConfig?)>((false, null));
+            return (false, null);
         }
 
         var cleanKey = apiKey.Trim();
@@ -423,38 +438,37 @@ public class ApplicationRegistryService : IApplicationRegistryService
             cleanKey = cleanKey[7..].Trim();
         }
 
-        // 1. Check if an Application STS Token is presented
-        if (cleanKey.StartsWith("ug_sts_", StringComparison.OrdinalIgnoreCase))
+        // 1. Application STS token.
+        if (cleanKey.StartsWith("ug_sts_", StringComparison.Ordinal))
         {
-            var (isStsValid, payload, failureReason) = _securityService.ValidateAppStsToken(cleanKey);
+            var (isStsValid, payload, failureReason) = await _securityService.ValidateAppStsTokenAsync(cleanKey, cancellationToken);
             if (!isStsValid || payload == null)
             {
                 _logger.LogWarning("STS token rejection for appId '{AppId}': {Reason}", appId, failureReason);
-                return Task.FromResult<(bool, AppConfig?)>((false, null));
+                return (false, null);
             }
 
-            // Verify appId scope (Admin tokens with '*' can invoke any app; otherwise must match exact appId)
+            // Admin tokens may invoke any app; an app token must match this exact appId.
             if (!payload.IsAdmin && !string.Equals(payload.AppId, appId, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning("STS token appId mismatch. Token appId: '{TokenAppId}', Request appId: '{ReqAppId}'", payload.AppId, appId);
-                return Task.FromResult<(bool, AppConfig?)>((false, null));
+                return (false, null);
             }
 
-            return Task.FromResult<(bool, AppConfig?)>((true, app));
+            return (true, app);
         }
 
-        // 2. Check Master Admin Key
-        if (_securityService.VerifyKey(cleanKey, _securityService.HashKey(_options.Security.AdminApiKey)))
-        {
-            return Task.FromResult<(bool, AppConfig?)>((true, app));
-        }
-
-        // 3. Check App Hashed Long-Term API Key
+        // 2. The application's own long-term key.
+        //
+        // The master admin key is deliberately NOT accepted here. One credential that
+        // authenticates as every tenant leaves no separation of duty and no partial
+        // containment after a leak; admins reach applications through an admin STS token
+        // instead, which is attributable and revocable.
         var isValid = _securityService.VerifyKey(cleanKey, app.ApiKeyHash);
-        return Task.FromResult<(bool, AppConfig?)>((isValid, isValid ? app : null));
+        return (isValid, isValid ? app : null);
     }
 
-    public Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(
+    public async Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(
         string? appId,
         string apiKey,
         int durationSeconds = 3600,
@@ -463,26 +477,28 @@ public class ApplicationRegistryService : IApplicationRegistryService
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
-            return Task.FromResult<AppStsTokenResponse?>(null);
+            return null;
 
         var cleanKey = apiKey.Trim();
         if (cleanKey.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
             cleanKey = cleanKey[7..].Trim();
 
-        var duration = TimeSpan.FromSeconds(durationSeconds <= 0 ? 3600 : durationSeconds);
+        var duration = TimeSpan.FromSeconds(
+            durationSeconds <= 0 ? _options.Security.DefaultStsTokenLifetimeSeconds : durationSeconds);
 
-        // A. Is Master Admin Key provided?
-        if (_securityService.VerifyKey(cleanKey, _securityService.HashKey(_options.Security.AdminApiKey)))
+        // A. Master admin credential, read from the secret store.
+        if (await _adminCredentials.VerifyAsync(cleanKey, cancellationToken))
         {
             var targetAppId = string.IsNullOrWhiteSpace(appId) ? "*" : appId.Trim();
-            var (adminToken, adminExpiresAt) = _securityService.IssueAppStsToken(
+            var (adminToken, adminExpiresAt) = await _securityService.IssueAppStsTokenAsync(
                 targetAppId,
                 duration,
                 scope,
                 isAdmin: true,
-                callerId: callerId);
+                callerId: callerId,
+                cancellationToken: cancellationToken);
 
-            return Task.FromResult<AppStsTokenResponse?>(new AppStsTokenResponse
+            return new AppStsTokenResponse
             {
                 Token = adminToken,
                 TokenType = "Bearer",
@@ -492,10 +508,10 @@ public class ApplicationRegistryService : IApplicationRegistryService
                 ExpiresAt = adminExpiresAt,
                 Scope = scope,
                 IsAdmin = true
-            });
+            };
         }
 
-        // B. Is an App Long-Term Key provided?
+        // B. An application's own long-term key.
         AppConfig? matchedApp = null;
         if (!string.IsNullOrWhiteSpace(appId) && _apps.TryGetValue(appId, out var specificApp))
         {
@@ -519,17 +535,18 @@ public class ApplicationRegistryService : IApplicationRegistryService
 
         if (matchedApp == null)
         {
-            return Task.FromResult<AppStsTokenResponse?>(null);
+            return null;
         }
 
-        var (appToken, appExpiresAt) = _securityService.IssueAppStsToken(
+        var (appToken, appExpiresAt) = await _securityService.IssueAppStsTokenAsync(
             matchedApp.AppId,
             duration,
             scope,
             isAdmin: false,
-            callerId: callerId);
+            callerId: callerId,
+            cancellationToken: cancellationToken);
 
-        return Task.FromResult<AppStsTokenResponse?>(new AppStsTokenResponse
+        return new AppStsTokenResponse
         {
             Token = appToken,
             TokenType = "Bearer",
@@ -539,10 +556,10 @@ public class ApplicationRegistryService : IApplicationRegistryService
             ExpiresAt = appExpiresAt,
             Scope = scope,
             IsAdmin = false
-        });
+        };
     }
 
-    public Task<AppStsTokenResponse> MintStsTokenDirectAsync(
+    public async Task<AppStsTokenResponse> MintStsTokenDirectAsync(
         string appId,
         int durationSeconds = 3600,
         string scope = "invoke",
@@ -550,15 +567,18 @@ public class ApplicationRegistryService : IApplicationRegistryService
         string? callerId = null,
         CancellationToken cancellationToken = default)
     {
-        var duration = TimeSpan.FromSeconds(durationSeconds <= 0 ? 3600 : durationSeconds);
-        var (token, expiresAt) = _securityService.IssueAppStsToken(
+        var duration = TimeSpan.FromSeconds(
+            durationSeconds <= 0 ? _options.Security.DefaultStsTokenLifetimeSeconds : durationSeconds);
+
+        var (token, expiresAt) = await _securityService.IssueAppStsTokenAsync(
             appId,
             duration,
             scope,
             isAdmin,
-            callerId);
+            callerId,
+            cancellationToken);
 
-        return Task.FromResult(new AppStsTokenResponse
+        return new AppStsTokenResponse
         {
             Token = token,
             TokenType = "Bearer",
@@ -568,7 +588,31 @@ public class ApplicationRegistryService : IApplicationRegistryService
             ExpiresAt = expiresAt,
             Scope = scope,
             IsAdmin = isAdmin
-        });
+        };
+    }
+
+    public async Task RecordManagementActionAsync(ManagementAuditEntry entry, CancellationToken cancellationToken = default)
+    {
+        if (!_options.Storage.AuditLogEnabled) return;
+
+        await _auditLock.WaitAsync(cancellationToken);
+        try
+        {
+            Directory.CreateDirectory(_auditDirectory);
+            var line = JsonSerializer.Serialize(entry, AuditJsonOpts);
+            await File.AppendAllTextAsync(CurrentAuditFilePath, line + Environment.NewLine, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to append a management action to the audit trail.");
+        }
+        finally
+        {
+            _auditLock.Release();
+        }
+
+        _logger.LogInformation("Management action {Action} on {Resource} by {Actor} (success={Success})",
+            entry.Action, entry.Resource ?? "-", entry.Actor ?? "unknown", entry.Success);
     }
 
     public async Task RecordMetricAsync(RequestLogEntry log, CancellationToken cancellationToken = default)
@@ -642,9 +686,8 @@ public class ApplicationRegistryService : IApplicationRegistryService
         _fileLock.Wait();
         try
         {
-            var list = _apps.Values.ToList();
-            var json = JsonSerializer.Serialize(list, JsonOpts);
-            File.WriteAllText(_registryFilePath, json);
+            var json = JsonSerializer.Serialize(_apps.Values.ToList(), JsonOpts);
+            WriteAtomic(json);
         }
         finally
         {
@@ -657,9 +700,10 @@ public class ApplicationRegistryService : IApplicationRegistryService
         await _fileLock.WaitAsync();
         try
         {
-            var list = _apps.Values.ToList();
-            var json = JsonSerializer.Serialize(list, JsonOpts);
-            await File.WriteAllTextAsync(_registryFilePath, json);
+            var json = JsonSerializer.Serialize(_apps.Values.ToList(), JsonOpts);
+            var tempPath = _registryFilePath + ".tmp";
+            await File.WriteAllTextAsync(tempPath, json);
+            ReplaceRegistryFile(tempPath);
         }
         finally
         {
@@ -667,11 +711,49 @@ public class ApplicationRegistryService : IApplicationRegistryService
         }
     }
 
+    /// <summary>
+    /// Writes through a temp file and swaps it in, so a crash or a full disk mid-write
+    /// leaves the previous registry intact instead of truncating every application.
+    /// </summary>
+    private void WriteAtomic(string json)
+    {
+        var tempPath = _registryFilePath + ".tmp";
+        File.WriteAllText(tempPath, json);
+        ReplaceRegistryFile(tempPath);
+    }
+
+    private void ReplaceRegistryFile(string tempPath)
+    {
+        if (File.Exists(_registryFilePath))
+        {
+            // File.Replace keeps a backup and is atomic on NTFS.
+            File.Replace(tempPath, _registryFilePath, _registryFilePath + ".bak", ignoreMetadataErrors: true);
+        }
+        else
+        {
+            File.Move(tempPath, _registryFilePath);
+        }
+    }
+
+    /// <summary>
+    /// Normalises an application id to [a-z0-9-]. The id ends up in URLs, HTML attributes and
+    /// log lines, so anything outside that set is rejected rather than silently transformed.
+    /// </summary>
     private static string Slugify(string text)
     {
-        return text.ToLowerInvariant()
-            .Replace(" ", "-")
-            .Replace("_", "-")
-            .Trim('-');
+        var normalized = text.Trim().ToLowerInvariant()
+            .Replace(' ', '-')
+            .Replace('_', '-');
+
+        if (!AppIdRegex().IsMatch(normalized))
+        {
+            throw new InvalidOperationException(
+                $"Application id '{text}' is not valid. Use 3-64 characters of a-z, 0-9 and hyphen.");
+        }
+
+        return normalized.Trim('-');
     }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")]
+    private static partial System.Text.RegularExpressions.Regex AppIdRegex();
 }

@@ -1,5 +1,4 @@
-using Microsoft.AspNetCore.DataProtection;
-using Microsoft.Extensions.Logging.Abstractions;
+using UnifiedGateway.Models;
 using UnifiedGateway.Services;
 using Xunit;
 
@@ -8,15 +7,15 @@ namespace UnifiedGatewayV2.Tests;
 public class SecurityServiceTests
 {
     private readonly ISecurityService _securityService;
+    private readonly InMemorySigningKeyProvider _signingKeys;
 
     public SecurityServiceTests()
     {
-        var dataProtectionProvider = new EphemeralDataProtectionProvider();
-        _securityService = new SecurityService(dataProtectionProvider, NullLogger<SecurityService>.Instance);
+        (_securityService, _signingKeys) = TestFactory.CreateSecurityService();
     }
 
     [Fact]
-    public void GenerateApiKey_ShouldReturnValidFormatAndMatchingHash()
+    public async Task GenerateApiKey_ShouldReturnValidFormatAndMatchingHash()
     {
         var (rawKey, keyHash, keyPrefix) = _securityService.GenerateApiKey();
 
@@ -27,7 +26,7 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public void VerifyKey_WithInvalidKey_ShouldReturnFalse()
+    public async Task VerifyKey_WithInvalidKey_ShouldReturnFalse()
     {
         var (rawKey, keyHash, _) = _securityService.GenerateApiKey();
         var invalidKey = rawKey + "invalid";
@@ -36,19 +35,19 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public void EncryptAndDecrypt_ShouldPreserveOriginalText()
+    public async Task EncryptAndDecrypt_ShouldPreserveOriginalText()
     {
         var secret = "arn:aws:iam::123456789012:role/BedrockExecutionRole";
 
-        var encrypted = _securityService.Encrypt(secret);
+        var encrypted = await _securityService.EncryptAsync(secret);
         Assert.NotEqual(secret, encrypted);
 
-        var decrypted = _securityService.Decrypt(encrypted);
+        var decrypted = await _securityService.DecryptAsync(encrypted);
         Assert.Equal(secret, decrypted);
     }
 
     [Fact]
-    public void MaskSecret_ShouldMaskMiddleCharacters()
+    public async Task MaskSecret_ShouldMaskMiddleCharacters()
     {
         var secret = "arn:aws:iam::123456789012:role/BedrockExecutionRole";
         var masked = _securityService.MaskSecret(secret, 4);
@@ -61,9 +60,9 @@ public class SecurityServiceTests
     #region Application STS Token Tests
 
     [Fact]
-    public void IssueAppStsToken_ReturnsValidTokenFormatAndExpiry()
+    public async Task IssueAppStsToken_ReturnsValidTokenFormatAndExpiry()
     {
-        var (token, expiresAt) = _securityService.IssueAppStsToken(
+        var (token, expiresAt) = await _securityService.IssueAppStsTokenAsync(
             appId: "invoice-analyzer",
             duration: TimeSpan.FromMinutes(30),
             scope: "invoke",
@@ -76,16 +75,16 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public void ValidateAppStsToken_WithValidToken_ReturnsValidClaims()
+    public async Task ValidateAppStsToken_WithValidToken_ReturnsValidClaims()
     {
-        var (token, _) = _securityService.IssueAppStsToken(
+        var (token, _) = await _securityService.IssueAppStsTokenAsync(
             appId: "invoice-analyzer",
             duration: TimeSpan.FromHours(1),
             scope: "invoke",
             isAdmin: false,
             callerId: "client-worker-1");
 
-        var (isValid, payload, failureReason) = _securityService.ValidateAppStsToken(token);
+        var (isValid, payload, failureReason) = await _securityService.ValidateAppStsTokenAsync(token);
 
         Assert.True(isValid);
         Assert.Null(failureReason);
@@ -97,14 +96,14 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public void ValidateAppStsToken_WithBearerPrefix_TrimsAndValidates()
+    public async Task ValidateAppStsToken_WithBearerPrefix_TrimsAndValidates()
     {
-        var (token, _) = _securityService.IssueAppStsToken(
+        var (token, _) = await _securityService.IssueAppStsTokenAsync(
             appId: "finance-bot",
             duration: TimeSpan.FromMinutes(15));
 
         var bearerToken = $"Bearer {token}";
-        var (isValid, payload, _) = _securityService.ValidateAppStsToken(bearerToken);
+        var (isValid, payload, _) = await _securityService.ValidateAppStsTokenAsync(bearerToken);
 
         Assert.True(isValid);
         Assert.NotNull(payload);
@@ -112,9 +111,9 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public void ValidateAppStsToken_WithTamperedPayload_FailsSignature()
+    public async Task ValidateAppStsToken_WithTamperedPayload_FailsSignature()
     {
-        var (token, _) = _securityService.IssueAppStsToken(
+        var (token, _) = await _securityService.IssueAppStsTokenAsync(
             appId: "app-original",
             duration: TimeSpan.FromHours(1));
 
@@ -122,7 +121,7 @@ public class SecurityServiceTests
         var parts = token.Split('.');
         var tamperedToken = parts[0] + "tamper." + parts[1];
 
-        var (isValid, payload, failureReason) = _securityService.ValidateAppStsToken(tamperedToken);
+        var (isValid, payload, failureReason) = await _securityService.ValidateAppStsTokenAsync(tamperedToken);
 
         Assert.False(isValid);
         Assert.Null(payload);
@@ -131,15 +130,15 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public void InspectAppStsToken_ReturnsAccurateTTLAndClaims()
+    public async Task InspectAppStsToken_ReturnsAccurateTTLAndClaims()
     {
-        var (token, _) = _securityService.IssueAppStsToken(
+        var (token, _) = await _securityService.IssueAppStsTokenAsync(
             appId: "test-app",
             duration: TimeSpan.FromSeconds(120),
             scope: "invoke",
             isAdmin: true);
 
-        var inspect = _securityService.InspectAppStsToken(token);
+        var inspect = await _securityService.InspectAppStsTokenAsync(token);
 
         Assert.True(inspect.IsValid);
         Assert.False(inspect.IsExpired);

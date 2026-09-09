@@ -55,6 +55,157 @@ document.addEventListener('DOMContentLoaded', () => {
   const genStsExpiryText = document.getElementById('gen-sts-expiry-text');
 
   // Universal Router
+  // The management plane is authenticated. Every /api call carries the operator's
+  // credential from session storage; a 401 means "sign in", not "server error".
+  // --- Okta session ---------------------------------------------------------
+  // The dashboard holds the access token for the tab only. A 401 means the session
+  // has gone and the user signs in again; a 403 means their group does not grant
+  // the action, which is a message rather than a sign-in prompt.
+
+  const OKTA_TOKEN_KEY = 'ug_okta_access_token';
+  const OKTA_USER_KEY = 'ug_okta_user';
+
+  function oktaToken() {
+    try { return sessionStorage.getItem(OKTA_TOKEN_KEY) || ''; } catch (e) { return ''; }
+  }
+
+  function oktaUser() {
+    try { return JSON.parse(sessionStorage.getItem(OKTA_USER_KEY) || 'null'); } catch (e) { return null; }
+  }
+
+  function setOktaSession(token, user) {
+    try {
+      sessionStorage.setItem(OKTA_TOKEN_KEY, token);
+      sessionStorage.setItem(OKTA_USER_KEY, JSON.stringify(user));
+    } catch (e) { /* private mode: the session simply does not persist */ }
+  }
+
+  function clearOktaSession() {
+    try {
+      sessionStorage.removeItem(OKTA_TOKEN_KEY);
+      sessionStorage.removeItem(OKTA_USER_KEY);
+    } catch (e) { /* nothing to clear */ }
+  }
+
+  function adminCredential() {
+    // Kept for the universal-invoke panel, which takes a gateway credential directly.
+    try { return sessionStorage.getItem('ug_universal_admin_key') || ''; } catch (e) { return ''; }
+  }
+
+  async function apiFetch(url, options) {
+    const opts = Object.assign({}, options || {});
+    opts.headers = Object.assign({}, opts.headers || {});
+
+    const token = oktaToken();
+    if (token) {
+      opts.headers['Authorization'] = 'Bearer ' + token;
+    }
+
+    const res = await fetch(url, opts);
+    if (res.status === 401) {
+      clearOktaSession();
+      showLogin();
+    } else if (res.status === 403 && !opts.quiet) {
+      showAuthRequired(403);
+    }
+    return res;
+  }
+
+  // --- Sign-in flow ----------------------------------------------------------
+
+  function showLogin() {
+    const overlay = document.getElementById('okta-login');
+    const session = document.getElementById('okta-session');
+    if (overlay) overlay.hidden = false;
+    if (session) session.hidden = true;
+  }
+
+  function hideLogin(user) {
+    const overlay = document.getElementById('okta-login');
+    const session = document.getElementById('okta-session');
+    const label = document.getElementById('okta-session-user');
+    if (overlay) overlay.hidden = true;
+    if (session) session.hidden = false;
+    if (label && user) {
+      label.textContent = user.email + '  •  ' + (user.groups || []).join(', ');
+    }
+  }
+
+  /**
+   * Hides controls the signed-in user's groups do not permit. This is presentation
+   * only - the gateway evaluates every request against IAM regardless of what the
+   * page shows, so a hidden button is a courtesy, not a control.
+   */
+  function applyGroupVisibility(user) {
+    const isAdmin = (user.groups || []).indexOf('UnifiedGateway-Admins') !== -1;
+    document.querySelectorAll('[data-requires-admin]').forEach(el => {
+      el.hidden = !isAdmin;
+    });
+  }
+
+  async function signIn(username, password) {
+    const res = await fetch('/okta/oauth2/v1/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: username, password: password })
+    });
+
+    if (!res.ok) {
+      throw new Error('Sign-in failed. Check the username and password.');
+    }
+
+    const data = await res.json();
+    const user = { email: data.email, groups: data.groups || [] };
+    setOktaSession(data.access_token, user);
+    return user;
+  }
+
+  const loginForm = document.getElementById('okta-login-form');
+  if (loginForm) {
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errorBox = document.getElementById('okta-login-error');
+      if (errorBox) errorBox.hidden = true;
+
+      try {
+        const user = await signIn(
+          document.getElementById('okta-username').value.trim(),
+          document.getElementById('okta-password').value
+        );
+        hideLogin(user);
+        applyGroupVisibility(user);
+        location.reload();
+      } catch (err) {
+        if (errorBox) {
+          errorBox.textContent = err.message;
+          errorBox.hidden = false;
+        }
+      }
+    });
+  }
+
+  const signOutBtn = document.getElementById('okta-signout');
+  if (signOutBtn) {
+    signOutBtn.addEventListener('click', () => {
+      clearOktaSession();
+      location.reload();
+    });
+  }
+
+  function showAuthRequired(status) {
+    const banner = document.getElementById('auth-banner');
+    const message = status === 403
+      ? 'Your role is not permitted to perform this action.'
+      : 'Enter an admin credential or STS token to use the console.';
+
+    if (banner) {
+      banner.textContent = message;
+      banner.hidden = false;
+    } else {
+      console.warn('Management API returned ' + status + ': ' + message);
+    }
+  }
+
   const univApiKey = document.getElementById('univ-api-key');
   const btnToggleUnivKey = document.getElementById('btn-toggle-univ-key');
   const univProvider = document.getElementById('univ-provider');
@@ -62,11 +213,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnRunUnivTest = document.getElementById('btn-run-univ-test');
 
   // Initialize stored Universal API Key
-  const storedUnivKey = localStorage.getItem('ug_universal_admin_key') || 'ug-dev-admin-key';
+  const storedUnivKey = sessionStorage.getItem('ug_universal_admin_key') || '';
   if (univApiKey) {
     univApiKey.value = storedUnivKey;
     univApiKey.addEventListener('input', () => {
-      localStorage.setItem('ug_universal_admin_key', univApiKey.value.trim());
+      sessionStorage.setItem('ug_universal_admin_key', univApiKey.value.trim());
     });
   }
 
@@ -116,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Fetch STS Status
   async function loadStsStatus() {
     try {
-      const res = await fetch('/api/credentials/status');
+      const res = await apiFetch('/api/credentials/status', { quiet: true });
       if (!res.ok) throw new Error('Status check failed');
       const data = await res.json();
 
@@ -138,7 +289,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Guardrail Configuration & Sandbox
   async function loadGuardrailConfig() {
     try {
-      const res = await fetch('/api/guardrails/config');
+      const res = await apiFetch('/api/guardrails/config', { quiet: true });
       if (!res.ok) return;
       const config = await res.json();
 
@@ -209,7 +360,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     try {
-      const res = await fetch('/api/guardrails/config', {
+      const res = await apiFetch('/api/guardrails/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -242,7 +393,7 @@ document.addEventListener('DOMContentLoaded', () => {
         mode: modeVal !== "" ? parseInt(modeVal) : undefined
       };
 
-      const res = await fetch('/api/guardrails/test', {
+      const res = await apiFetch('/api/guardrails/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -286,7 +437,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Fetch Models
   async function loadModels() {
     try {
-      const res = await fetch('/api/models');
+      const res = await apiFetch('/api/models');
       if (res.ok) {
         availableModels = await res.json();
         populateModelDropdowns();
@@ -330,7 +481,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Fetch Applications
   async function loadApps() {
     try {
-      const res = await fetch('/api/apps');
+      const res = await apiFetch('/api/apps');
       if (!res.ok) throw new Error('Failed to fetch apps');
       allApps = await res.json();
       renderAppCards(allApps);
@@ -364,7 +515,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="app-meta-list">
           <div class="app-meta-row">
             <span>Provider:</span>
-            <span>${app.provider.toUpperCase()}</span>
+            <span>${escapeHtml(String(app.provider || '').toUpperCase())}</span>
           </div>
           <div class="app-meta-row">
             <span>Model:</span>
@@ -380,13 +531,26 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
         </div>
         <div class="app-card-actions" style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button class="btn btn-primary btn-sm" onclick="selectAppForTest('${app.appId}')">Test API</button>
-          <button class="btn btn-outline btn-sm" onclick="openStsModalForApp('${app.appId}')" style="border-color: rgba(16,185,129,0.5); color:#34d399;">⚡ Mint STS</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteApp('${app.appId}')">Delete</button>
+          <button class="btn btn-primary btn-sm" data-action="test">Test API</button>
+          <button class="btn btn-outline btn-sm" data-action="mint-sts" data-requires-admin style="border-color: rgba(16,185,129,0.5); color:#34d399;">⚡ Mint STS</button>
+          <button class="btn btn-danger btn-sm" data-action="delete" data-requires-admin>Delete</button>
         </div>
       `;
+      card.dataset.appId = app.appId;
+      card.querySelectorAll('button[data-action]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = card.dataset.appId;
+          if (btn.dataset.action === 'test') selectAppForTest(id);
+          else if (btn.dataset.action === 'mint-sts') openStsModalForApp(id);
+          else if (btn.dataset.action === 'delete') deleteApp(id);
+        });
+      });
+
       container.appendChild(card);
     });
+
+    const user = oktaUser();
+    if (user) applyGroupVisibility(user);
   }
 
   function renderGeneratorSelect(apps) {
@@ -448,7 +612,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btnMintGenSts.textContent = 'Minting...';
 
     try {
-      const res = await fetch(`/api/apps/${appId}/sts-token?durationSeconds=${duration}`, {
+      const res = await apiFetch(`/api/apps/${encodeURIComponent(appId)}/sts-token?durationSeconds=${encodeURIComponent(duration)}`, {
         method: 'POST'
       });
       if (!res.ok) throw new Error('Failed to mint STS token');
@@ -487,7 +651,7 @@ document.addEventListener('DOMContentLoaded', () => {
     genAppDetails.innerHTML = `
       <div class="app-meta-list" style="border:none; padding:0; margin-bottom:12px;">
         <div class="app-meta-row"><span>System Prompt:</span><span style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(app.systemPrompt)}</span></div>
-        <div class="app-meta-row"><span>Target Engine:</span><span>${app.provider.toUpperCase()} (${app.model})</span></div>
+        <div class="app-meta-row"><span>Target Engine:</span><span>${escapeHtml(String(app.provider || '').toUpperCase())} (${escapeHtml(app.model || '')})</span></div>
         <div class="app-meta-row"><span>Default Temp / MaxTokens:</span><span>${app.temperature} / ${app.maxTokens}</span></div>
       </div>
     `;
@@ -662,7 +826,7 @@ Write-Output $response.output`;
         temperature: temp ? parseFloat(temp) : undefined
       };
 
-      const res = await fetch(`/api/apps/${appId}/test`, {
+      const res = await apiFetch(`/api/apps/${encodeURIComponent(appId)}/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -743,7 +907,7 @@ Write-Output $response.output`;
           <div class="response-meta">
             <span class="meta-item">Latency: <strong>${data.latency_ms || 0} ms</strong></span>
             <span class="meta-item">Tokens: <strong>${data.tokens?.total || 0}</strong></span>
-            <span class="meta-item">Provider: <strong>${data.provider}</strong></span>
+            <span class="meta-item">Provider: <strong>${escapeHtml(data.provider || '')}</strong></span>
           </div>
           <div class="response-output-box">
             <label>Generated Output:</label>
@@ -761,7 +925,7 @@ Write-Output $response.output`;
   // Telemetry & Metrics
   async function loadMetrics() {
     try {
-      const res = await fetch('/api/metrics');
+      const res = await apiFetch('/api/metrics');
       if (!res.ok) return;
       const data = await res.json();
 
@@ -833,7 +997,7 @@ Write-Output $response.output`;
     };
 
     try {
-      const res = await fetch('/api/apps', {
+      const res = await apiFetch('/api/apps', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -903,7 +1067,7 @@ Write-Output $response.output`;
       btnMintStsModal.textContent = 'Minting STS Token...';
 
       try {
-        const res = await fetch(`/api/apps/${selectedAppForStsModal.appId}/sts-token?durationSeconds=${duration}`, {
+        const res = await apiFetch(`/api/apps/${encodeURIComponent(selectedAppForStsModal.appId)}/sts-token?durationSeconds=${encodeURIComponent(duration)}`, {
           method: 'POST'
         });
 
@@ -962,7 +1126,7 @@ Write-Output $response.output`;
   window.deleteApp = async (appId) => {
     if (!confirm(`Are you sure you want to delete application '${appId}'?`)) return;
     try {
-      const res = await fetch(`/api/apps/${appId}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/apps/${encodeURIComponent(appId)}`, { method: 'DELETE' });
       if (res.ok) {
         await loadApps();
       }
@@ -976,7 +1140,17 @@ Write-Output $response.output`;
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
   }
 
-  // Initial Load
+  // Initial load. Nothing is fetched until there is a session, so an unauthenticated
+  // visitor sees the sign-in form rather than a wall of failed requests.
+  const existingUser = oktaUser();
+  if (!oktaToken() || !existingUser) {
+    showLogin();
+    return;
+  }
+
+  hideLogin(existingUser);
+  applyGroupVisibility(existingUser);
+
   loadStsStatus();
   loadModels();
   loadApps();
