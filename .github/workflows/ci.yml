@@ -1,0 +1,86 @@
+name: CI
+
+# Supply-chain and quality gates. The point of running these here rather than relying on a
+# developer reading a build log is that a vulnerable dependency or a committed credential
+# fails the pull request instead of merging quietly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # A dependency that was clean at merge can pick up an advisory a week later, so the
+    # audit also runs on a schedule against main rather than only on change.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, audit and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # --locked-mode fails if packages.lock.json does not match the project files, so a
+      # dependency cannot be added or bumped without the lock file being updated in the
+      # same commit. NuGetAudit is configured in the csproj to fail on any advisory.
+      - name: Restore (locked, audited)
+        run: dotnet restore --locked-mode
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release /warnaserror
+
+      - name: Test
+        run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks needs history to scan commits, not just the working tree: a credential
+          # that was committed and then removed is still a leaked credential.
+          fetch-depth: 0
+
+      - name: Scan for committed credentials
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  analyze:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+          queries: security-extended
+
+      - name: Build for analysis
+        run: dotnet build --configuration Release
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@v3

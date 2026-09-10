@@ -4,6 +4,19 @@ namespace UnifiedGateway.Services;
 
 public interface IModelRouter
 {
-    Task<UniversalResponse> RouteAsync(UniversalRequest request, CancellationToken cancellationToken = default);
-    Task<UniversalResponse> RouteAppRequestAsync(string appId, InvokeAppRequest request, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Routes a direct request. <paramref name="caller"/> is stamped onto the audit record;
+    /// omitting it produces an unattributed line, which is only correct when there really
+    /// is no identity.
+    /// </summary>
+    Task<UniversalResponse> RouteAsync(
+        UniversalRequest request,
+        CallerContext? caller = null,
+        CancellationToken cancellationToken = default);
+
+    Task<UniversalResponse> RouteAppRequestAsync(
+        string appId,
+        InvokeAppRequest request,
+        CallerContext? caller = null,
+        CancellationToken cancellationToken = default);
 }

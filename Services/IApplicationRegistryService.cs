@@ -15,7 +15,13 @@ public interface IApplicationRegistryService
     /// Returns the new plaintext key exactly once, or null if the application does not exist.
     /// </summary>
     Task<string?> RotateApiKeyAsync(string appId, CancellationToken cancellationToken = default);
-    Task<(bool isValid, AppConfig? app)> AuthenticateAppAsync(string appId, string apiKey, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Authenticates a caller for one application. The returned <see cref="CallerContext"/>
+    /// carries how they authenticated, so the audit record can be attributed without the
+    /// endpoint re-validating the credential.
+    /// </summary>
+    Task<(bool isValid, AppConfig? app, CallerContext? caller)> AuthenticateAppAsync(
+        string appId, string apiKey, CancellationToken cancellationToken = default);
     Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(string? appId, string apiKey, int durationSeconds = 3600, string scope = "invoke", string? callerId = null, CancellationToken cancellationToken = default);
     Task<AppStsTokenResponse> MintStsTokenDirectAsync(string appId, int durationSeconds = 3600, string scope = "invoke", bool isAdmin = false, string? callerId = null, CancellationToken cancellationToken = default);
     Task RecordMetricAsync(RequestLogEntry log, CancellationToken cancellationToken = default);

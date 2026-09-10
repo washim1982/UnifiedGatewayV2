@@ -5,6 +5,7 @@ using Amazon.SecurityToken;
 using Amazon.SecurityToken.Model;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
+using UnifiedGateway.Services.Aws;
 
 namespace UnifiedGateway.Services;
 
@@ -12,6 +13,7 @@ public class STSService : ISTSService, IDisposable
 {
     private readonly GatewayOptions _options;
     private readonly ISecurityService _securityService;
+    private readonly IRolesAnywhereCredentialProvider? _rolesAnywhere;
     private readonly ILogger<STSService> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
@@ -19,15 +21,18 @@ public class STSService : ISTSService, IDisposable
     private DateTimeOffset? _expirationUtc;
     private string? _lastError;
     private bool _isAssumedRole;
+    private string? _subjectArn;
 
     public STSService(
         IOptions<GatewayOptions> options,
         ISecurityService securityService,
-        ILogger<STSService> logger)
+        ILogger<STSService> logger,
+        IRolesAnywhereCredentialProvider? rolesAnywhere = null)
     {
         _options = options.Value;
         _securityService = securityService;
         _logger = logger;
+        _rolesAnywhere = rolesAnywhere;
     }
 
     public async Task<AWSCredentials> GetCredentialsAsync(CancellationToken cancellationToken = default)
@@ -54,15 +59,44 @@ public class STSService : ISTSService, IDisposable
             var isExpiring = _expirationUtc.HasValue &&
                              _expirationUtc.Value <= DateTimeOffset.UtcNow.AddMinutes(bufferMinutes);
 
+            var source = _options.Aws.EffectiveCredentialSource;
+
+            var roleArn = source == AwsCredentialSource.RolesAnywhere
+                ? _options.Aws.RolesAnywhere.RoleArn
+                : _options.Aws.AssumeRoleArn;
+
+            // Reported so an operator can see which certificate this host presents and when
+            // it expires -- a Roles Anywhere deployment fails on certificate lifecycle far
+            // more often than on anything else, and it fails everywhere at once.
+            RolesAnywhereCertificateInfo? certificate = null;
+            if (source == AwsCredentialSource.RolesAnywhere && _rolesAnywhere is not null)
+            {
+                try
+                {
+                    certificate = _rolesAnywhere.DescribeCertificate();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Could not describe the Roles Anywhere certificate.");
+                }
+            }
+
             return new AwsCredentialStatus
             {
                 IsInitialized = _cachedCredentials != null,
                 IsAssumedRole = _isAssumedRole,
                 Region = _options.Aws.Region,
-                RoleArnMasked = !string.IsNullOrEmpty(_options.Aws.AssumeRoleArn)
-                    ? _securityService.MaskSecret(_options.Aws.AssumeRoleArn, 12)
+                CredentialSource = source.ToString(),
+                RoleArnMasked = string.IsNullOrEmpty(roleArn)
+                    ? null
+                    : _securityService.MaskSecret(roleArn, 12),
+                ProfileUsed = source == AwsCredentialSource.LocalProfile
+                    ? _options.Aws.LocalProfileName
                     : null,
-                ProfileUsed = _options.Aws.UseLocalProfile ? _options.Aws.LocalProfileName : null,
+                SubjectArnMasked = string.IsNullOrEmpty(_subjectArn)
+                    ? null
+                    : _securityService.MaskSecret(_subjectArn, 12),
+                Certificate = certificate,
                 ExpirationUtc = _expirationUtc,
                 IsExpiringSoon = isExpiring,
                 LastError = _lastError
@@ -79,13 +113,42 @@ public class STSService : ISTSService, IDisposable
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            _logger.LogInformation("Refreshing AWS credentials. Region={Region}, UseLocalProfile={UseLocalProfile}",
-                _options.Aws.Region, _options.Aws.UseLocalProfile);
+            var source = _options.Aws.EffectiveCredentialSource;
+
+            _logger.LogInformation("Refreshing AWS credentials. Region={Region}, Source={Source}",
+                _options.Aws.Region, source);
 
             var regionEndpoint = RegionEndpoint.GetBySystemName(_options.Aws.Region);
             AWSCredentials? baseCredentials = null;
 
-            if (_options.Aws.UseLocalProfile)
+            // Roles Anywhere yields credentials for the target role directly, so it neither
+            // needs base credentials nor a subsequent AssumeRole. It returns here.
+            if (source == AwsCredentialSource.RolesAnywhere)
+            {
+                if (_rolesAnywhere is null)
+                {
+                    throw new InvalidOperationException(
+                        "Gateway:Aws:CredentialSource is 'RolesAnywhere' but no Roles Anywhere provider " +
+                        "was registered. This is a wiring fault, not a configuration one.");
+                }
+
+                var (rolesAnywhereCredentials, expiration, subjectArn) =
+                    await _rolesAnywhere.CreateSessionAsync(cancellationToken);
+
+                _cachedCredentials = rolesAnywhereCredentials;
+                _expirationUtc = expiration;
+                _isAssumedRole = true;
+                _subjectArn = subjectArn;
+                _lastError = null;
+
+                _logger.LogInformation(
+                    "AWS credentials obtained via IAM Roles Anywhere. Valid until {ExpirationUtc:O}.",
+                    _expirationUtc);
+
+                return;
+            }
+
+            if (source == AwsCredentialSource.LocalProfile)
             {
                 var profileName = string.IsNullOrWhiteSpace(_options.Aws.LocalProfileName)
                     ? "default"

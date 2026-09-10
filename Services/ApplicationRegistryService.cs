@@ -345,21 +345,22 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         return rawKey;
     }
 
-    public async Task<(bool isValid, AppConfig? app)> AuthenticateAppAsync(string appId, string apiKey, CancellationToken cancellationToken = default)
+    public async Task<(bool isValid, AppConfig? app, CallerContext? caller)> AuthenticateAppAsync(
+        string appId, string apiKey, CancellationToken cancellationToken = default)
     {
         if (!_apps.TryGetValue(appId, out var app) || !app.IsActive)
         {
-            return (false, null);
+            return (false, null, null);
         }
 
         if (!_options.Security.EnforceAppApiKey)
         {
-            return (true, app);
+            return (true, app, new CallerContext { Actor = appId, AuthType = "AuthenticationDisabled" });
         }
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            return (false, null);
+            return (false, null, null);
         }
 
         var cleanKey = apiKey.Trim();
@@ -375,17 +376,32 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
             if (!isStsValid || payload == null)
             {
                 _logger.LogWarning("STS token rejection for appId '{AppId}': {Reason}", appId, failureReason);
-                return (false, null);
+                return (false, null, null);
             }
 
             // Admin tokens may invoke any app; an app token must match this exact appId.
             if (!payload.IsAdmin && !string.Equals(payload.AppId, appId, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning("STS token appId mismatch. Token appId: '{TokenAppId}', Request appId: '{ReqAppId}'", payload.AppId, appId);
-                return (false, null);
+                return (false, null, null);
             }
 
-            return (true, app);
+            // The scope claim is a restriction the API advertises, so it has to bite. A token
+            // minted for reading must not be usable to spend money on inference.
+            if (!SecurityService.ScopePermits(payload.Scope, GatewayScopes.Invoke))
+            {
+                _logger.LogWarning(
+                    "STS token for '{AppId}' carries scope '{Scope}', which does not permit {Required}.",
+                    appId, payload.Scope, GatewayScopes.Invoke);
+                return (false, null, null);
+            }
+
+            return (true, app, new CallerContext
+            {
+                Actor = payload.CallerId ?? payload.AppId,
+                AuthType = payload.IsAdmin ? "AdminStsToken" : "AppStsToken",
+                TokenId = payload.Jti
+            });
         }
 
         // 2. The application's own long-term key.
@@ -395,9 +411,18 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         // containment after a leak; admins reach applications through an admin STS token
         // instead, which is attributable and revocable.
         var isValid = _securityService.VerifyKey(cleanKey, app.ApiKeyHash);
-        return (isValid, isValid ? app : null);
-    }
+        if (!isValid)
+        {
+            return (false, null, null);
+        }
 
+        return (true, app, new CallerContext
+        {
+            // The prefix identifies which key was used without recording the key itself.
+            Actor = app.ApiKeyPrefix,
+            AuthType = "AppApiKey"
+        });
+    }
     public async Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(
         string? appId,
         string apiKey,

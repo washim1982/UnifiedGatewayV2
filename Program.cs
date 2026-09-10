@@ -9,6 +9,7 @@ using UnifiedGateway.Auth;
 using UnifiedGateway.Endpoints;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
+using UnifiedGateway.Services.Aws;
 using UnifiedGateway.Services.Cloud;
 using UnifiedGateway.Services.Cloud.Aws;
 using UnifiedGateway.Services.Cloud.LocalDotNet;
@@ -126,8 +127,11 @@ switch (cloudOptions.Provider)
 builder.Services.AddSingleton<ISigningKeyProvider, SigningKeyProvider>();
 builder.Services.AddSingleton<IAdminCredentialService, AdminCredentialService>();
 
-// Bedrock Runtime. The simulator implements the real wire contract
-// (POST /model/{modelId}/invoke), so pointing the AWS SDK at it is pure configuration.
+// Bedrock Runtime. Resolved from EffectiveBedrockProvider, not Provider: Development binds
+// the control plane above to the local simulator but sends model calls to real AWS, because
+// no simulator produces the model output that is actually being developed against.
+// The Python simulator implements the real wire contract (POST /model/{modelId}/invoke),
+// so pointing the AWS SDK at it stays pure configuration.
 builder.Services.AddSingleton(_ =>
 {
     var config = new AmazonBedrockRuntimeConfig
@@ -186,6 +190,20 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<ISecurityService, SecurityService>();
 builder.Services.AddSingleton<IGuardrailService, GuardrailService>();
+// IAM Roles Anywhere. The gateway runs under IIS, so there is no instance or task role to
+// inherit; Test and Production exchange an X.509 certificate for short-lived credentials
+// instead of holding a long-lived access key. Registered only when selected, so a
+// Development host never tries to open a certificate store it has nothing in.
+if (gatewayOptions.Aws.EffectiveCredentialSource == AwsCredentialSource.RolesAnywhere)
+{
+    builder.Services.AddHttpClient(RolesAnywhereCredentialProvider.HttpClientName, c =>
+    {
+        c.Timeout = TimeSpan.FromSeconds(15);
+    });
+
+    builder.Services.AddSingleton<IRolesAnywhereCredentialProvider, RolesAnywhereCredentialProvider>();
+}
+
 builder.Services.AddSingleton<ISTSService, STSService>();
 builder.Services.AddSingleton<IBedrockService, BedrockService>();
 builder.Services.AddSingleton<ILocalModelService, LocalModelService>();

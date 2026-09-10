@@ -35,9 +35,26 @@ public class CloudOptions
     public AuditStorageOptions Storage { get; set; } = new();
 
     /// <summary>
+    /// Overrides <see cref="Provider"/> for Bedrock alone. Null means "follow Provider".
+    ///
+    /// Bedrock is the one seam where a simulator is a poor substitute: the control plane
+    /// (S3, KMS, IAM) is a contract the simulators reproduce faithfully, but model output
+    /// is the thing under development, and a stub of it tests nothing. So Development binds
+    /// the control plane to the local simulator and Bedrock to the real service, reached
+    /// with the developer's own ~/.aws profile.
+    ///
+    /// Only 'Simulator' and 'Aws' are meaningful here -- the .NET simulator has no Bedrock
+    /// at all, which is why leaving this to inherit 'LocalDotNet' is refused at startup.
+    /// </summary>
+    public CloudProviderMode? BedrockProvider { get; set; }
+
+    /// <summary>The provider actually in force for Bedrock, after the override is applied.</summary>
+    public CloudProviderMode EffectiveBedrockProvider => BedrockProvider ?? Provider;
+
+    /// <summary>
     /// Base URL for the Bedrock Runtime API. Empty means "use the real AWS endpoint for the
-    /// configured region". The simulator is wire-compatible (POST /model/{id}/invoke), so
-    /// pointing the AWS SDK at it needs no code change.
+    /// configured region". The Python simulator is wire-compatible (POST /model/{id}/invoke),
+    /// so pointing the AWS SDK at it needs no code change.
     /// </summary>
     public string BedrockServiceUrl { get; set; } = string.Empty;
 }

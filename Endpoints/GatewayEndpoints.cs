@@ -41,8 +41,18 @@ public static class GatewayEndpoints
                 }, statusCode: StatusCodes.Status401Unauthorized);
             }
 
-            var tokenResponse = await registryService.IssueStsTokenForAppAsync(
-                body.AppId, apiKey, body.DurationSeconds, body.Scope, body.CallerId, ct);
+            AppStsTokenResponse? tokenResponse;
+            try
+            {
+                tokenResponse = await registryService.IssueStsTokenForAppAsync(
+                    body.AppId, apiKey, body.DurationSeconds, body.Scope, body.CallerId, ct);
+            }
+            catch (ArgumentException ex)
+            {
+                // An unrecognised scope is the caller asking for something that does not
+                // exist, not a server fault. Say so plainly and name the valid values.
+                return Results.BadRequest(new { error = "INVALID_SCOPE", message = ex.Message });
+            }
 
             if (tokenResponse == null)
             {
@@ -94,12 +104,13 @@ public static class GatewayEndpoints
             [FromBody] InvokeAppRequest request,
             [FromHeader(Name = "X-API-Key")] string? xApiKey,
             [FromHeader(Name = "Authorization")] string? authHeader,
+            HttpContext ctx,
             IApplicationRegistryService registryService,
             IModelRouter router,
             CancellationToken ct) =>
         {
             var apiKey = ExtractApiKey(xApiKey, authHeader);
-            var (isValid, appConfig) = await registryService.AuthenticateAppAsync(appId, apiKey, ct);
+            var (isValid, appConfig, caller) = await registryService.AuthenticateAppAsync(appId, apiKey, ct);
 
             if (!isValid || appConfig == null)
             {
@@ -115,7 +126,8 @@ public static class GatewayEndpoints
                 }, statusCode: StatusCodes.Status401Unauthorized);
             }
 
-            var response = await router.RouteAppRequestAsync(appId, request, ct);
+            var response = await router.RouteAppRequestAsync(
+                appId, request, WithRequestDetail(caller, ctx), ct);
             return ToHttpResult(response);
         })
         .WithName("InvokeApplication")
@@ -129,12 +141,15 @@ public static class GatewayEndpoints
             [FromBody] UniversalRequest request,
             [FromHeader(Name = "X-API-Key")] string? xApiKey,
             [FromHeader(Name = "Authorization")] string? authHeader,
+            HttpContext ctx,
             IOptions<GatewayOptions> options,
             ISecurityService securityService,
             IAdminCredentialService adminCredentials,
             IModelRouter router,
             CancellationToken ct) =>
         {
+            CallerContext? caller = null;
+
             if (options.Value.Security.EnforceAppApiKey)
             {
                 var apiKey = ExtractApiKey(xApiKey, authHeader);
@@ -145,11 +160,30 @@ public static class GatewayEndpoints
                     if (apiKey.StartsWith("ug_sts_", StringComparison.Ordinal))
                     {
                         var (isStsValid, payload, _) = await securityService.ValidateAppStsTokenAsync(apiKey, ct);
-                        isAuthorized = isStsValid && payload is { IsAdmin: true };
+
+                        // Admin flag AND admin scope. A token can be minted by an admin and
+                        // still be scoped down; the narrower of the two has to win.
+                        isAuthorized = isStsValid
+                            && payload is { IsAdmin: true }
+                            && SecurityService.ScopePermits(payload.Scope, GatewayScopes.Admin);
+
+                        if (isAuthorized)
+                        {
+                            caller = new CallerContext
+                            {
+                                Actor = payload!.CallerId ?? payload.AppId,
+                                AuthType = "AdminStsToken",
+                                TokenId = payload.Jti
+                            };
+                        }
                     }
                     else
                     {
                         isAuthorized = await adminCredentials.VerifyAsync(apiKey, ct);
+                        if (isAuthorized)
+                        {
+                            caller = new CallerContext { Actor = "break-glass", AuthType = "MasterAdminKey" };
+                        }
                     }
                 }
 
@@ -167,7 +201,7 @@ public static class GatewayEndpoints
                 }
             }
 
-            var response = await router.RouteAsync(request, ct);
+            var response = await router.RouteAsync(request, WithRequestDetail(caller, ctx), ct);
             return ToHttpResult(response);
         })
         .WithName("InvokeUniversal")
@@ -189,6 +223,22 @@ public static class GatewayEndpoints
         #endregion
     }
 
+
+    /// <summary>
+    /// Completes an authenticated caller with the details only the request knows: source
+    /// address and correlation id. The id is echoed to the caller on failure, so a support
+    /// conversation and the audit record start from the same reference.
+    /// </summary>
+    private static CallerContext WithRequestDetail(CallerContext? caller, HttpContext ctx)
+    {
+        var trace = ctx.TraceIdentifier is { Length: > 0 } id ? id : Guid.NewGuid().ToString("N");
+
+        return (caller ?? CallerContext.Anonymous()) with
+        {
+            SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+            TraceId = trace
+        };
+    }
     /// <summary>
     /// Maps a gateway error code onto the HTTP status a client should actually see.
     /// Returning 200 for a blocked or failed request makes SDKs, load balancers and

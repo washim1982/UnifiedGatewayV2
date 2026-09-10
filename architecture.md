@@ -111,11 +111,11 @@ flowchart TD
 | STRIDE Category | Threat Description | Attack Vector | Security Countermeasures & Implementation |
 | :--- | :--- | :--- | :--- |
 | **Spoofing** | Impersonation of client applications or unauthorized access to per-app endpoints. | Attackers guess or brute-force API keys or spoof client identity. | • Cryptographically random 256-bit API keys (`ug_live_*`).<br>• Keys stored only as SHA-256 hashes.<br>• Fixed-time string comparison (`CryptographicOperations.FixedTimeEquals`) to defeat timing attacks.<br>• Per-app isolation and Master Key partition. |
-| **Tampering** | Modification of in-flight prompts, prompt injection attacks, or unauthorized tampering with registry files. | Prompt injection (`ignore previous instructions`), DAN jailbreak exploits, or man-in-the-middle attacks. | • **Guardrails Subsystem** detects and sanitizes/blocks prompt override attempts.<br>• Mandatory TLS for all external and cloud communication.<br>• AWS SigV4 cryptographic request signing on all AWS Bedrock calls.<br>• Data Protection API (`IDataProtector`) encrypts sensitive configuration at rest. |
-| **Repudiation** | Malicious users denying sending abusive, sensitive, or high-cost prompts. | Lack of invocation logs or trace correlation. | • Granular audit logging with `RequestLogEntry` tracking timestamp, `appId`, model, guardrail action (`Redacted`/`Blocked`), and token counts.<br>• Unique `traceId` correlation across requests. |
+| **Tampering** | Modification of in-flight prompts, prompt injection attacks, or unauthorized tampering with registry files. | Prompt injection (`ignore previous instructions`), DAN jailbreak exploits, or man-in-the-middle attacks. | • **Guardrails Subsystem** detects and sanitizes/blocks prompt override attempts.<br>• Mandatory TLS for all external and cloud communication.<br>• AWS SigV4 cryptographic request signing on all AWS Bedrock calls.<br>• Secrets and the token signing key are held in the environment's secret store (KMS-encrypted), not in a local key ring. |
+| **Repudiation** | Malicious users denying sending abusive, sensitive, or high-cost prompts. | Lack of invocation logs or trace correlation. | • Append-only audit trail in object storage (S3), partitioned by record date, surviving host loss.<br>• Every record carries actor, auth type, token id, source IP and `traceId`.<br>• Privileged management actions (create, delete, rotate, guardrail and policy changes) are recorded with the same attribution. |
 | **Information Disclosure** | Leakage of customer PII (SSN, Email, Phone), PCI (Credit Cards, CVV, IBAN), API tokens, or AWS STS temporary credentials. | Prompts containing sensitive user data being transmitted to cloud LLM or stored in unencrypted logs. | • **Pre-Execution Guardrails** redact sensitive data (`[REDACTED_CREDIT_CARD]`, `[REDACTED_SSN]`, `[REDACTED_AWS_KEY]`) before reaching AWS Bedrock or logs.<br>• Algorithmic **Luhn checksum** verifies valid credit cards to prevent false positives.<br>• AWS STS session tokens never logged or serialized to client responses. |
 | **Denial of Service (DoS)** | Backend model exhaustion, prompt flooding, or local LLM server starvation. | Flooding gateway with maximum-token requests or triggering concurrent heavy model loads. | • Configurable rate limiting per minute (`RateLimitPerMinute`).<br>• Explicit `max_tokens` quotas and request timeouts (30–120s).<br>• Resilient Polly circuit breaking & retry policies.<br>• Automated failover routing (Bedrock -> Local or vice-versa). |
-| **Elevation of Privilege** | Cross-tenant access to another application's prompt or unauthorized access to AWS infrastructure. | Tenant parameter pollution or IAM role permission creep. | • Strict app isolation: requests to `/gateway/{appId}/invoke` can only execute within the registered `appId` security context.<br>• AWS IAM Role scoped strictly to `bedrock:InvokeModel`.<br>• Non-root container execution (`appuser`, UID 1000). |
+| **Elevation of Privilege** | Cross-tenant access to another application's prompt or unauthorized access to AWS infrastructure. | Tenant parameter pollution or IAM role permission creep. | • Strict app isolation: requests to `/gateway/{appId}/invoke` can only execute within the registered `appId` security context.<br>• AWS IAM Role scoped strictly to `bedrock:InvokeModel`.<br>• Management-plane actions authorized per action against IAM policy; the master credential no longer authenticates as an application.<br>• STS token `scope` is enforced, so a read-scoped token cannot invoke. |
 
 ---
 
@@ -154,14 +154,35 @@ flowchart TD
 
 ## 5. Security Review Sign-Off & Verification
 
-| Security Control Requirement | Implementation Status | Evidence / Verification Location |
+Status as of the 2026-09-10 remediation review. Each row cites the code that implements
+it, not the file that mentions it. Items still open are listed as open rather than
+omitted — a sign-off document that only records successes is how gaps get accepted.
+
+| Control | Status | Evidence |
 | :--- | :--- | :--- |
-| **Admin-Level Pre-Execution Guardrails** | **PASSED** | [`GuardrailService.cs`](Services/GuardrailService.cs), [`ModelRouter.cs`](Services/ModelRouter.cs) |
-| **PCI Credit Card Luhn Validation** | **PASSED** | Validated in [`GuardrailServiceTests.cs`](UnifiedGatewayV2.Tests/GuardrailServiceTests.cs). |
-| **PII & Secrets Redaction** | **PASSED** | Inline sanitization verified for SSN, Email, Phone, AWS Keys, and JWTs. |
-| **Prompt Injection & Jailbreak Defense** | **PASSED** | System override and DAN patterns detected and quarantined. |
-| **Zero Plaintext Secrets / STS Isolation** | **PASSED** | [`STSService.cs`](Services/STSService.cs), [`AwsCredentialBackgroundService.cs`](Services/AwsCredentialBackgroundService.cs) |
-| **Egress (Response) Guardrails** | **PASSED** | Model output scanned for leaked PCI/PII/secrets; fails closed. [`GuardrailService.cs`](Services/GuardrailService.cs), [`ModelRouter.cs`](Services/ModelRouter.cs) |
-| **Rate Limiting & Abuse Clamps** | **PASSED** | Per-caller limiter, input/token/body caps. [`Program.cs`](Program.cs) |
-| **Persistent Audit Trail** | **PASSED** | Append-only JSONL, survives restart. [`ApplicationRegistryService.cs`](Services/ApplicationRegistryService.cs) |
-| **Automated Unit & Integration Test Suite** | **PASSED** | 40/40 tests passing in [`UnifiedGatewayV2.Tests`](UnifiedGatewayV2.Tests). |
+| Management plane authenticated and authorized | **Implemented** | `RequireAuthorization` on the `/api` group plus a named IAM action per handler — [`DashboardEndpoints.cs`](Endpoints/DashboardEndpoints.cs) |
+| Operator identity via OIDC, roles from group membership | **Implemented** | [`OktaAuthentication.cs`](Auth/OktaAuthentication.cs), [`GatewayAuthentication.cs`](Auth/GatewayAuthentication.cs) |
+| Application keys hashed, constant-time verification | **Implemented** | 256-bit CSPRNG keys, SHA-256, `FixedTimeEquals` — [`SecurityService.cs`](Services/SecurityService.cs) |
+| Token revocation (key generation + `jti` denylist) | **Implemented** | [`SecurityService.cs`](Services/SecurityService.cs), [`SigningKeyProvider.cs`](Services/Cloud/SigningKeyProvider.cs) |
+| Token `scope` enforced | **Implemented** | `ScopePermits` gates invoke and admin — [`SecurityService.cs`](Services/SecurityService.cs), [`ApplicationRegistryService.cs`](Services/ApplicationRegistryService.cs) |
+| Signing key held off the web tier | **Implemented** | HMAC key in the KMS-backed secret store; DataProtection removed entirely |
+| Mandatory TLS | **Implemented** | `UseHsts` + `UseHttpsRedirection`, exempt only on loopback environments — [`Program.cs`](Program.cs) |
+| Ingress and egress guardrails, fail closed | **Implemented** | A scan that times out is a violation, not a pass — [`GuardrailService.cs`](Services/GuardrailService.cs), [`ModelRouter.cs`](Services/ModelRouter.cs) |
+| Guardrail patterns bounded (ReDoS) | **Implemented** | 250 ms match timeout on all 14 patterns |
+| Rate limiting across the surface | **Implemented** | Global floor plus `per-app`, `token-issuance` and `management` policies |
+| Polly retry **and** circuit breaking | **Implemented** | [`Program.cs`](Program.cs) — retry with backoff plus `CircuitBreakerAsync` |
+| Correct HTTP status codes | **Implemented** | 422 on guardrail block, 413 oversized, 502/504 provider failure — [`GatewayEndpoints.cs`](Endpoints/GatewayEndpoints.cs) |
+| Security response headers and CSP | **Implemented** | [`Program.cs`](Program.cs) |
+| Durable, attributable audit trail | **Implemented** | S3-backed, date-partitioned — [`S3AuditStore.cs`](Services/Telemetry/S3AuditStore.cs) |
+| Backend error detail withheld from callers | **Implemented** | Stable code plus a correlation id; detail logged against it |
+| Supply-chain scanning | **Implemented** | `NuGetAudit` failing the build, committed lock file, CodeQL and secret scanning in CI |
+| Per-application ownership | **Open** | An AppOwner still sees every application, not only their own |
+| Host credentials without a stored access key | **Implemented** | IAM Roles Anywhere exchanges an X.509 client certificate for expiring credentials; every AWS seam resolves through it — [`RolesAnywhereCredentialProvider.cs`](Services/Aws/RolesAnywhereCredentialProvider.cs) |
+| Asymmetric token signing via KMS | **Open** | Tokens are HMAC-signed with a key fetched from the secret store |
+| Registry in a database | **Open** | Still a local file, so the gateway is single-node for writes |
+| SIEM export | **Open** | Nothing ships audit records off-box |
+| Per-app token budgets that refuse requests | **Open** | Billing reports spend; it does not enforce a ceiling |
+| Identity verified by the gateway in AWS mode | **Open** | `AwsIdentityProvider` trusts an upstream-asserted principal ARN; it performs no SigV4 or OIDC verification of its own |
+| AWS provider path exercised | **Open** | Written against the same contracts as the simulator providers, but never executed against a real account. The Roles Anywhere signing is unit-tested against the certificate's own public key; it has not been verified against a real trust anchor. |
+| Container hardening | **Not applicable** | There is no container; deployment is IIS in-process. The previous claim of non-root execution at UID 1000 described an image that does not exist. |
+| Penetration test | **Open** | Not performed; the threat model above does not yet cover the management plane |

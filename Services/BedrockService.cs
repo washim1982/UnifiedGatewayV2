@@ -42,21 +42,66 @@ public class BedrockService : IBedrockService
     /// <summary>
     /// Builds the Bedrock client for the bound environment.
     ///
-    /// The AWS simulator implements the real Bedrock Runtime contract
+    /// The Python simulator implements the real Bedrock Runtime contract
     /// (POST /model/{modelId}/invoke), so TEST differs from PROD only by the ServiceURL on
     /// the injected config: no branch in the invocation path, no second code path to keep
     /// in step. Credentials differ because the simulator does not verify SigV4 on this route.
+    ///
+    /// The decision reads <see cref="CloudOptions.EffectiveBedrockProvider"/> rather than
+    /// <see cref="CloudOptions.Provider"/>, so Development can reach real Bedrock through the
+    /// developer's own profile while every other AWS seam stays on the local simulator.
     /// </summary>
     private async Task<AmazonBedrockRuntimeClient> CreateClientAsync(CancellationToken cancellationToken)
     {
-        if (_cloudOptions.Provider == CloudProviderMode.Simulator)
+        if (_cloudOptions.EffectiveBedrockProvider == CloudProviderMode.Simulator)
         {
             var placeholder = new BasicAWSCredentials("SIMULATED_KEY", "SIMULATED_SECRET");
             return new AmazonBedrockRuntimeClient(placeholder, _bedrockConfig);
         }
 
-        var credentials = await _stsService.GetCredentialsAsync(cancellationToken);
+        AWSCredentials credentials;
+        try
+        {
+            credentials = await _stsService.GetCredentialsAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Distinguished from an invocation failure on purpose. Everything else Bedrock
+            // can throw is infrastructure the caller cannot act on; this one is local
+            // configuration a developer fixes in a minute, and burying it behind a
+            // correlation id would cost far more than it protects.
+            throw new BedrockCredentialsUnavailableException(DescribeCredentialSource(), ex);
+        }
+
         return new AmazonBedrockRuntimeClient(credentials, _bedrockConfig);
+    }
+
+    /// <summary>
+    /// Names where credentials were meant to come from — the configured intent, not a claim
+    /// about what was actually used. When a named profile is missing the SDK silently falls
+    /// back to environment variables and then instance metadata, so saying the credentials
+    /// "came from" the profile would be wrong in exactly the case this message exists for.
+    ///
+    /// Config keys and a profile name only: the role ARN and account id stay out, since this
+    /// text reaches the caller.
+    /// </summary>
+    private string DescribeCredentialSource()
+    {
+        if (_options.Aws.UseLocalProfile)
+        {
+            var profile = string.IsNullOrWhiteSpace(_options.Aws.LocalProfileName)
+                ? "default"
+                : _options.Aws.LocalProfileName;
+
+            return $"the local AWS profile '{profile}' (Gateway:Aws:LocalProfileName), falling back " +
+                   $"to environment variables and instance metadata if that profile is absent. " +
+                   $"Check that ~/.aws/credentials or ~/.aws/config defines it, that any SSO session " +
+                   $"for it is still signed in, and that it grants bedrock:InvokeModel in " +
+                   $"{_options.Aws.Region}";
+        }
+
+        return "the ambient AWS credential chain (environment variables, ECS/EC2 role). " +
+               "Set Gateway:Aws:UseLocalProfile to true to use a named ~/.aws profile instead";
     }
 
     public async Task<UniversalResponse> InvokeModelAsync(UniversalRequest request, CancellationToken cancellationToken = default)
@@ -95,10 +140,44 @@ public class BedrockService : IBedrockService
                 SessionId = request.Metadata?.SessionId
             };
         }
+        // Credential resolution mostly succeeds lazily: with no profile and no environment
+        // variables the SDK still hands back an instance-metadata credential object, which
+        // only fails when it is first used to sign. So the same classification has to run
+        // here, or the common local case (no ~/.aws profile yet) reports as an infrastructure
+        // fault rather than the setup step it actually is.
+        catch (Exception ex) when (IsCredentialProblem(ex))
+        {
+            stopwatch.Stop();
+
+            _logger.LogError(ex,
+                "Bedrock rejected the gateway's credentials for model {ModelId}.", modelId);
+
+            return new UniversalResponse
+            {
+                Output = string.Empty,
+                Model = modelId,
+                Provider = "bedrock",
+                LatencyMs = stopwatch.ElapsedMilliseconds,
+                AppId = request.Metadata?.AppId,
+                SessionId = request.Metadata?.SessionId,
+                Error = new GatewayError
+                {
+                    Code = "BEDROCK_CREDENTIALS_UNAVAILABLE",
+                    Message = "Bedrock is configured to use the real AWS service, but the credentials were missing or rejected.",
+                    Details = $"Configured credential source: {DescribeCredentialSource()}."
+                }
+            };
+        }
         catch (Exception ex)
         {
             stopwatch.Stop();
-            _logger.LogError(ex, "Bedrock invocation failed for model {ModelId}", modelId);
+
+            // An AWS exception message routinely carries the account id, the role ARN and the
+            // request id. That belongs in the log, not in a response to the caller — they get
+            // the correlation id and support looks the rest up against it.
+            var reference = request.Metadata?.TraceId ?? Guid.NewGuid().ToString("N");
+            _logger.LogError(ex,
+                "Bedrock invocation failed for model {ModelId}. Reference {Reference}.", modelId, reference);
 
             return new UniversalResponse
             {
@@ -111,8 +190,8 @@ public class BedrockService : IBedrockService
                 Error = new GatewayError
                 {
                     Code = "BEDROCK_INVOCATION_FAILED",
-                    Message = ex.Message,
-                    Details = ex.GetType().Name
+                    Message = "The Bedrock invocation failed.",
+                    Details = $"Reference: {reference}"
                 }
             };
         }
@@ -330,5 +409,95 @@ public class BedrockService : IBedrockService
         };
     }
 
+    /// <summary>
+    /// True when a failure is the gateway's own credentials rather than the model call.
+    ///
+    /// Deliberately narrow. A guess that is too broad would relabel a genuine service fault
+    /// as a configuration problem and send an operator looking in the wrong place, so this
+    /// matches only the codes AWS returns for an identity that is absent, unrecognised,
+    /// expired, or not permitted.
+    /// </summary>
+    public static bool IsCredentialProblem(Exception ex)
+    {
+        if (ex is BedrockCredentialsUnavailableException)
+        {
+            return true;
+        }
+
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is AmazonServiceException svc &&
+                CredentialErrorCodes.Contains(svc.ErrorCode ?? string.Empty))
+            {
+                return true;
+            }
+
+            // Credential resolution failures carry no error code at all, so they have to be
+            // matched on the message. Note that AmazonServiceException does NOT derive from
+            // AmazonClientException -- both descend directly from Exception -- so testing one
+            // type here would miss the case this exists for: the metadata-service probe a
+            // machine makes when it has no profile and no environment variables.
+            if (current is AmazonClientException or AmazonServiceException &&
+                CredentialPhrases.Any(phrase =>
+                    current.Message.Contains(phrase, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Phrases the SDK uses when it cannot produce an identity. Kept specific: a bare match
+    /// on "credentials" would also catch messages about the *caller's* credentials, which is
+    /// a different problem with a different fix.
+    /// </summary>
+    private static readonly string[] CredentialPhrases =
+    [
+        "Instance Metadata",
+        "security credentials",
+        "Unable to find credentials",
+        "Unable to get credentials",
+        "no credentials",
+        "credentials not found",
+        "Failed to resolve AWS credentials",
+        "SSO session",
+        "token has expired"
+    ];
+
+    private static readonly HashSet<string> CredentialErrorCodes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AccessDenied",
+        "AccessDeniedException",
+        "AuthFailure",
+        "ExpiredToken",
+        "ExpiredTokenException",
+        "IncompleteSignature",
+        "InvalidAccessKeyId",
+        "InvalidClientTokenId",
+        "InvalidSignatureException",
+        "MissingAuthenticationToken",
+        "SignatureDoesNotMatch",
+        "UnrecognizedClientException",
+        "UnauthorizedOperation"
+    };
+
     private static int ApproximateTokens(int chars) => Math.Max(1, chars);
+}
+
+/// <summary>
+/// Raised when Bedrock is bound to the real AWS service but no credentials could be resolved.
+/// Separate from an invocation failure so the caller gets an actionable message instead of a
+/// correlation id pointing at a log they cannot read.
+/// </summary>
+public sealed class BedrockCredentialsUnavailableException : Exception
+{
+    public string CredentialSource { get; }
+
+    public BedrockCredentialsUnavailableException(string credentialSource, Exception inner)
+        : base($"No usable AWS credentials for Bedrock. Source: {credentialSource}.", inner)
+    {
+        CredentialSource = credentialSource;
+    }
 }

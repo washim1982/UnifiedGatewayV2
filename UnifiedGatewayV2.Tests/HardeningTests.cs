@@ -210,6 +210,7 @@ public class HardeningTests
         gateway.Security.AdminApiKey = string.Empty;
         gateway.Security.AllowedCorsOrigins = ["https://gateway.enterprise.internal"];
         gateway.Security.RequireHttps = true;
+        WithRolesAnywhere(gateway);
 
         var cloud = new CloudOptions { Provider = CloudProviderMode.Aws };
 
@@ -223,9 +224,107 @@ public class HardeningTests
         gateway.Security.RequireHttps = false;
         gateway.Security.AllowedCorsOrigins = ["http://localhost:3000"];
 
-        var cloud = new CloudOptions { Provider = CloudProviderMode.Simulator };
+        WithRolesAnywhere(gateway);
+
+        var cloud = new CloudOptions
+        {
+            Provider = CloudProviderMode.Simulator,
+            BedrockServiceUrl = "http://localhost:5004"
+        };
 
         StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Test" });
+    }
+
+    // --- M6: the scope claim is enforced, not decorative -----------------------------
+
+    [Theory]
+    [InlineData("invoke", "invoke", true)]
+    [InlineData("admin", "invoke", true)]      // an admin that cannot invoke would be odd
+    [InlineData("*", "admin", true)]
+    [InlineData("read", "invoke", false)]      // the whole point of the claim
+    [InlineData("invoke", "admin", false)]
+    [InlineData("read", "admin", false)]
+    [InlineData(null, "invoke", true)]         // pre-enforcement tokens are invoke-only
+    [InlineData(null, "admin", false)]
+    public void ScopePermits_FollowsTheDocumentedRules(string? granted, string required, bool expected)
+    {
+        Assert.Equal(expected, SecurityService.ScopePermits(granted, required));
+    }
+
+    [Fact]
+    public async Task AReadScopedTokenCannotInvoke()
+    {
+        var registry = CreateRegistry(out _, out var security);
+        var created = await registry.CreateAppAsync(new CreateAppRequest { AppId = "scoped-app", Name = "Scoped" });
+
+        // Same application, same signing key — only the scope differs.
+        var (readToken, _) = await security.IssueAppStsTokenAsync(
+            created.App.AppId, TimeSpan.FromMinutes(30), GatewayScopes.Read);
+        var (invokeToken, _) = await security.IssueAppStsTokenAsync(
+            created.App.AppId, TimeSpan.FromMinutes(30), GatewayScopes.Invoke);
+
+        var (readAllowed, _, _) = await registry.AuthenticateAppAsync(created.App.AppId, readToken);
+        var (invokeAllowed, _, _) = await registry.AuthenticateAppAsync(created.App.AppId, invokeToken);
+
+        Assert.False(readAllowed);
+        Assert.True(invokeAllowed);
+    }
+
+    [Fact]
+    public void AnUnknownScopeIsRejectedRatherThanSilentlyDowngraded()
+    {
+        // Quietly granting less than was asked for would let a caller believe they hold a
+        // permission they do not.
+        Assert.Throws<ArgumentException>(() => GatewayScopes.Normalize("superuser"));
+    }
+
+    // --- M1: invocation records carry the caller -------------------------------------
+
+    [Fact]
+    public async Task AnAppApiKeyAuthenticationReportsTheKeyPrefixAsTheActor()
+    {
+        var registry = CreateRegistry();
+        var created = await registry.CreateAppAsync(new CreateAppRequest { AppId = "attributed-app", Name = "A" });
+
+        var (isValid, _, caller) = await registry.AuthenticateAppAsync(created.App.AppId, created.ApiKey);
+
+        Assert.True(isValid);
+        Assert.NotNull(caller);
+        Assert.Equal("AppApiKey", caller!.AuthType);
+
+        // The prefix identifies which key was used without recording the key itself.
+        Assert.Equal(created.App.ApiKeyPrefix, caller.Actor);
+        Assert.DoesNotContain(created.ApiKey, caller.Actor);
+    }
+
+    [Fact]
+    public async Task AnStsAuthenticationReportsTheTokenId()
+    {
+        var registry = CreateRegistry(out _, out var security);
+        var created = await registry.CreateAppAsync(new CreateAppRequest { AppId = "token-app", Name = "T" });
+        var (token, _) = await security.IssueAppStsTokenAsync(created.App.AppId, TimeSpan.FromMinutes(30));
+        var (_, payload, _) = await security.ValidateAppStsTokenAsync(token);
+
+        var (isValid, _, caller) = await registry.AuthenticateAppAsync(created.App.AppId, token);
+
+        Assert.True(isValid);
+        Assert.NotNull(caller);
+        Assert.Equal("AppStsToken", caller!.AuthType);
+        Assert.Equal(payload!.Jti, caller.TokenId);
+    }
+    /// <summary>
+    /// A Roles Anywhere configuration that satisfies the validator. Outside Development
+    /// there is no other accepted credential source, so every non-dev validator test needs
+    /// one of these before it can exercise whatever it is actually about.
+    /// </summary>
+    private static void WithRolesAnywhere(GatewayOptions gateway)
+    {
+        gateway.Aws.CredentialSource = AwsCredentialSource.RolesAnywhere;
+        gateway.Aws.RolesAnywhere.TrustAnchorArn = "arn:aws:rolesanywhere:us-east-1:1:trust-anchor/a";
+        gateway.Aws.RolesAnywhere.ProfileArn = "arn:aws:rolesanywhere:us-east-1:1:profile/b";
+        gateway.Aws.RolesAnywhere.RoleArn = "arn:aws:iam::1:role/GatewayRole";
+        gateway.Aws.RolesAnywhere.Certificate.Source = CertificateSource.WindowsStore;
+        gateway.Aws.RolesAnywhere.Certificate.Thumbprint = "AABBCCDDEEFF00112233445566778899AABBCCDD";
     }
 
     // --- Provider binding guards ---------------------------------------------------
@@ -255,10 +354,172 @@ public class HardeningTests
         gateway.Security.RequireHttps = false;
         gateway.Security.AllowedCorsOrigins = ["http://localhost:3000"];
 
-        var cloud = new CloudOptions { Provider = CloudProviderMode.LocalDotNet };
+        // Bedrock has to be given a provider of its own: the .NET simulator does not
+        // implement it, so inheriting LocalDotNet is refused (see the Bedrock tests below).
+        var cloud = new CloudOptions
+        {
+            Provider = CloudProviderMode.LocalDotNet,
+            BedrockProvider = CloudProviderMode.Aws
+        };
+        gateway.Aws.UseLocalProfile = true;
 
         StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Development" });
     }
+
+    // --- Bedrock resolves independently of the global provider -------------------------
+
+    [Fact]
+    public void BedrockFollowsTheGlobalProviderWhenNoOverrideIsSet()
+    {
+        Assert.Equal(
+            CloudProviderMode.Aws,
+            new CloudOptions { Provider = CloudProviderMode.Aws }.EffectiveBedrockProvider);
+    }
+
+    [Fact]
+    public void BedrockOverrideLeavesEveryOtherSeamOnTheSimulator()
+    {
+        // The whole point of the seam: real model calls, simulated control plane.
+        var cloud = new CloudOptions
+        {
+            Provider = CloudProviderMode.LocalDotNet,
+            BedrockProvider = CloudProviderMode.Aws
+        };
+
+        Assert.Equal(CloudProviderMode.Aws, cloud.EffectiveBedrockProvider);
+        Assert.Equal(CloudProviderMode.LocalDotNet, cloud.Provider);
+    }
+
+    [Fact]
+    public void Startup_RefusesDevelopmentThatLeavesBedrockOnTheDotNetSimulator()
+    {
+        var gateway = new GatewayOptions();
+        gateway.Security.RequireHttps = false;
+        gateway.Security.AllowedCorsOrigins = ["http://localhost:3000"];
+
+        // No BedrockProvider, so Bedrock would inherit LocalDotNet — which has no Bedrock.
+        var cloud = new CloudOptions { Provider = CloudProviderMode.LocalDotNet };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Development" }));
+
+        Assert.Contains("Bedrock has no provider", ex.Message);
+    }
+
+    [Fact]
+    public void Startup_RefusesAServiceUrlWhenBedrockIsReal()
+    {
+        var gateway = new GatewayOptions();
+        gateway.Security.RequireHttps = false;
+        gateway.Security.AllowedCorsOrigins = ["http://localhost:3000"];
+        gateway.Aws.UseLocalProfile = true;
+
+        // A leftover simulator URL would silently send "real" Bedrock traffic to localhost.
+        var cloud = new CloudOptions
+        {
+            Provider = CloudProviderMode.LocalDotNet,
+            BedrockProvider = CloudProviderMode.Aws,
+            BedrockServiceUrl = "http://localhost:5004"
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Development" }));
+
+        Assert.Contains("BedrockServiceUrl", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Staging")]
+    [InlineData("Test")]
+    public void Startup_RefusesALocalAwsProfileOutsideDevelopment(string environmentName)
+    {
+        var gateway = new GatewayOptions();
+        gateway.Security.RequireHttps = true;
+        gateway.Security.AllowedCorsOrigins = ["https://gateway.enterprise.internal"];
+
+        // A developer's own credential is not an identity a shared host may run as.
+        gateway.Aws.UseLocalProfile = true;
+
+        var cloud = new CloudOptions { Provider = CloudProviderMode.Aws };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = environmentName }));
+
+        Assert.Contains("~/.aws profile", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("UnrecognizedClientException")]
+    [InlineData("InvalidSignatureException")]
+    [InlineData("ExpiredToken")]
+    [InlineData("AccessDeniedException")]
+    public void ACredentialRejectionIsReportedAsConfiguration(string errorCode)
+    {
+        var ex = new Amazon.Runtime.AmazonServiceException("rejected") { ErrorCode = errorCode };
+
+        Assert.True(BedrockService.IsCredentialProblem(ex));
+    }
+
+    [Fact]
+    public void AMissingProfileSurfacesThroughTheMetadataProbe()
+    {
+        // Verbatim from a live run on a machine with no ~/.aws profile and no AWS_ variables:
+        // the SDK falls through to instance metadata, which is not there either.
+        //
+        // The type matters. AmazonServiceException does not derive from AmazonClientException
+        // -- both descend directly from Exception -- and an earlier version of the classifier
+        // tested only the latter, so this exact case reached the caller as an opaque
+        // BEDROCK_INVOCATION_FAILED. Both types are asserted here for that reason.
+        const string message = "Unable to get IAM security credentials from EC2 Instance Metadata Service.";
+
+        Assert.True(BedrockService.IsCredentialProblem(
+            new Amazon.Runtime.AmazonServiceException(message)));
+        Assert.True(BedrockService.IsCredentialProblem(
+            new Amazon.Runtime.AmazonClientException(message)));
+    }
+
+    [Fact]
+    public void AmazonServiceExceptionDoesNotDeriveFromAmazonClientException()
+    {
+        // Pins the SDK detail the classifier depends on. If a future SDK version changes the
+        // hierarchy this fails here rather than silently widening what gets matched.
+        Assert.False(typeof(Amazon.Runtime.AmazonClientException)
+            .IsAssignableFrom(typeof(Amazon.Runtime.AmazonServiceException)));
+    }
+
+    [Fact]
+    public void AGenuineServiceFaultIsNotRelabelledAsConfiguration()
+    {
+        // Too broad a guess would send an operator to the credential chain while the real
+        // problem is the model or the service.
+        var throttled = new Amazon.Runtime.AmazonServiceException("slow down")
+        {
+            ErrorCode = "ThrottlingException"
+        };
+        var missingModel = new Amazon.Runtime.AmazonServiceException("no such model")
+        {
+            ErrorCode = "ResourceNotFoundException"
+        };
+
+        Assert.False(BedrockService.IsCredentialProblem(throttled));
+        Assert.False(BedrockService.IsCredentialProblem(missingModel));
+        Assert.False(BedrockService.IsCredentialProblem(new TimeoutException()));
+    }
+
+    [Fact]
+    public void ACredentialFailureIsFoundThroughTheInnerException()
+    {
+        // The SDK routinely wraps the real cause.
+        var inner = new Amazon.Runtime.AmazonServiceException("rejected")
+        {
+            ErrorCode = "UnrecognizedClientException"
+        };
+
+        Assert.True(BedrockService.IsCredentialProblem(
+            new InvalidOperationException("invocation failed", inner)));
+    }
+
     // --- L2: appId charset ------------------------------------------------------------
 
     [Theory]
@@ -291,18 +552,25 @@ public class HardeningTests
         var registry = CreateRegistry(out var adminKey);
         var created = await registry.CreateAppAsync(new CreateAppRequest { AppId = "tenant-app", Name = "n" });
 
-        var (withAdminKey, _) = await registry.AuthenticateAppAsync(created.App.AppId, adminKey);
+        var (withAdminKey, _, _) = await registry.AuthenticateAppAsync(created.App.AppId, adminKey);
         Assert.False(withAdminKey);
 
-        var (withOwnKey, _) = await registry.AuthenticateAppAsync(created.App.AppId, created.ApiKey);
+        var (withOwnKey, _, _) = await registry.AuthenticateAppAsync(created.App.AppId, created.ApiKey);
         Assert.True(withOwnKey);
     }
 
-    private static ApplicationRegistryService CreateRegistry() => CreateRegistry(out _);
+    private static ApplicationRegistryService CreateRegistry() => CreateRegistry(out _, out _);
 
     private static ApplicationRegistryService CreateRegistry(out string adminKey)
+        => CreateRegistry(out adminKey, out _);
+
+    /// <summary>
+    /// Also yields the security service the registry validates with. A test that mints a
+    /// token must use the same signing key, or it is testing key mismatch rather than scope.
+    /// </summary>
+    private static ApplicationRegistryService CreateRegistry(out string adminKey, out ISecurityService security)
     {
-        var (security, _) = TestFactory.CreateSecurityService();
+        (security, _) = TestFactory.CreateSecurityService();
         adminKey = "ug-test-admin-secret-key-value";
 
         var options = new GatewayOptions

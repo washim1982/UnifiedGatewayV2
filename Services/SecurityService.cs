@@ -127,7 +127,7 @@ public class SecurityService : ISecurityService
             AppId = appId,
             IssuedAtUnix = now.ToUnixTimeSeconds(),
             ExpiresAtUnix = expiresAt.ToUnixTimeSeconds(),
-            Scope = string.IsNullOrWhiteSpace(scope) ? "invoke" : scope.Trim().ToLowerInvariant(),
+            Scope = GatewayScopes.Normalize(scope),
             IsAdmin = isAdmin,
             CallerId = callerId,
             Generation = signingKey.Generation
@@ -262,6 +262,39 @@ public class SecurityService : ISecurityService
         };
     }
 
+
+    /// <summary>
+    /// True when a token's granted scope permits the required one.
+    ///
+    /// "*" grants everything and "admin" implies "invoke", since an administrator that could
+    /// not call a model would be a strange kind of administrator. Everything else must match
+    /// exactly — "read" does not imply "invoke", which is the whole point of the claim.
+    /// </summary>
+    public static bool ScopePermits(string? granted, string required)
+    {
+        if (string.IsNullOrWhiteSpace(granted))
+        {
+            // A token with no scope predates enforcement; treat it as invoke-only rather than
+            // as unrestricted, so an old token cannot be more powerful than a new one.
+            granted = GatewayScopes.Invoke;
+        }
+
+        var parts = granted.Split([' ', ',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        foreach (var part in parts)
+        {
+            if (string.Equals(part, GatewayScopes.All, StringComparison.Ordinal)) return true;
+            if (string.Equals(part, required, StringComparison.OrdinalIgnoreCase)) return true;
+
+            if (string.Equals(part, GatewayScopes.Admin, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(required, GatewayScopes.Invoke, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
     public void RevokeToken(string jti, DateTimeOffset expiresAt)
     {
         if (string.IsNullOrWhiteSpace(jti)) return;

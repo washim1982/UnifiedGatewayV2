@@ -116,11 +116,64 @@ public static class StartupValidator
                 "The .NET local AWS simulator is for Development only; use 'Aws' elsewhere.");
         }
 
-        if (cloud.Provider == CloudProviderMode.Aws && !string.IsNullOrWhiteSpace(cloud.BedrockServiceUrl))
+        // --- Bedrock ------------------------------------------------------------
+        // Bedrock resolves independently of the global provider so that Development can run
+        // the control plane on the local simulator while model calls reach the real service.
+        var bedrockProvider = cloud.EffectiveBedrockProvider;
+
+        // The .NET simulator has no Bedrock at all. Inheriting it would leave every model
+        // call failing at the transport layer with nothing naming the cause, so the choice
+        // has to be made explicitly.
+        if (bedrockProvider == CloudProviderMode.LocalDotNet)
         {
             failures.Add(
-                "Gateway:Cloud:BedrockServiceUrl overrides the Bedrock endpoint while the provider is " +
-                "'Aws'. Clear it so the SDK resolves the real regional endpoint.");
+                "Bedrock has no provider: Gateway:Cloud:Provider is 'LocalDotNet', which does not " +
+                "implement Bedrock. Set Gateway:Cloud:BedrockProvider to 'Aws' to call the real " +
+                "service, or to 'Simulator' to point it at a Bedrock-compatible endpoint.");
+        }
+
+        if (bedrockProvider == CloudProviderMode.Aws && !string.IsNullOrWhiteSpace(cloud.BedrockServiceUrl))
+        {
+            failures.Add(
+                "Gateway:Cloud:BedrockServiceUrl overrides the Bedrock endpoint while Bedrock resolves " +
+                "to 'Aws'. Clear it so the SDK resolves the real regional endpoint.");
+        }
+
+        if (bedrockProvider == CloudProviderMode.Simulator && string.IsNullOrWhiteSpace(cloud.BedrockServiceUrl))
+        {
+            failures.Add(
+                "Bedrock resolves to 'Simulator' but Gateway:Cloud:BedrockServiceUrl is empty, so the " +
+                "SDK would call the real regional endpoint with simulated credentials.");
+        }
+
+        // --- AWS credential source ----------------------------------------------
+        var credentialSource = gateway.Aws.EffectiveCredentialSource;
+
+        // A named profile is a developer's own credential. It is the right thing in a local
+        // loop and the wrong thing on a shared host, where the identity must be the host's.
+        if (credentialSource == AwsCredentialSource.LocalProfile && !isDevelopment)
+        {
+            failures.Add(
+                $"Gateway:Aws resolves to a local ~/.aws profile in the '{environment.EnvironmentName}' " +
+                "environment. That is a developer's own credential; set Gateway:Aws:CredentialSource to " +
+                "'RolesAnywhere' so the host authenticates with its own certificate.");
+        }
+
+        // The gateway deploys to IIS, so there is no instance or task role to inherit. Every
+        // alternative to Roles Anywhere therefore ends at a long-lived access key stored on
+        // the host -- exactly the credential this design exists to remove.
+        if (credentialSource != AwsCredentialSource.RolesAnywhere && RequiresRolesAnywhere(environment))
+        {
+            failures.Add(
+                $"Gateway:Aws:CredentialSource is '{credentialSource}' in the " +
+                $"'{environment.EnvironmentName}' environment. There is no instance or task role to " +
+                "inherit under IIS, so anything but 'RolesAnywhere' resolves to a long-lived access key " +
+                "on the host. Configure IAM Roles Anywhere.");
+        }
+
+        if (credentialSource == AwsCredentialSource.RolesAnywhere)
+        {
+            ValidateRolesAnywhere(gateway.Aws.RolesAnywhere, environment, isDevelopment, failures);
         }
 
         if (failures.Count == 0)
@@ -137,4 +190,103 @@ public static class StartupValidator
 
     private static bool IsTestLike(IHostEnvironment environment) =>
         environment.IsEnvironment("Test") || environment.IsEnvironment("Staging");
+
+    /// <summary>
+    /// Environments that reach real AWS and must do so with a host identity rather than a
+    /// stored key. Development is exempt because it talks to the local simulator, and its one
+    /// real dependency -- Bedrock -- deliberately uses the developer's own profile.
+    /// </summary>
+    private static bool RequiresRolesAnywhere(IHostEnvironment environment) =>
+        !environment.IsDevelopment();
+
+    private static void ValidateRolesAnywhere(
+        RolesAnywhereOptions rolesAnywhere,
+        IHostEnvironment environment,
+        bool isDevelopment,
+        List<string> failures)
+    {
+        var required = new (string Name, string Value)[]
+        {
+            ("TrustAnchorArn", rolesAnywhere.TrustAnchorArn),
+            ("ProfileArn", rolesAnywhere.ProfileArn),
+            ("RoleArn", rolesAnywhere.RoleArn)
+        };
+
+        foreach (var (name, value) in required)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                failures.Add($"Gateway:Aws:RolesAnywhere:{name} is required when CredentialSource is 'RolesAnywhere'.");
+            }
+            else if (value.Contains('<') || value.Contains('>'))
+            {
+                // The shipped templates carry <account-id> placeholders, and a deploy that
+                // forgets to substitute them fails at the first AWS call rather than at start.
+                failures.Add(
+                    $"Gateway:Aws:RolesAnywhere:{name} still contains a placeholder ('{value}'). " +
+                    "Substitute the real ARN at deploy time.");
+            }
+        }
+
+        // AWS rejects anything outside this range, and the failure it returns says only
+        // "ValidationException", which is a poor place to learn about it.
+        if (rolesAnywhere.DurationSeconds is < 900 or > 3600)
+        {
+            failures.Add(
+                $"Gateway:Aws:RolesAnywhere:DurationSeconds is {rolesAnywhere.DurationSeconds}. " +
+                "IAM Roles Anywhere accepts 900 to 3600 seconds.");
+        }
+
+        // Both of these turn a production deployment into something that is not talking to
+        // AWS at all, while still reporting healthy.
+        if (!isDevelopment && !string.IsNullOrWhiteSpace(rolesAnywhere.EndpointOverride))
+        {
+            failures.Add(
+                $"Gateway:Aws:RolesAnywhere:EndpointOverride is set in the '{environment.EnvironmentName}' " +
+                "environment. Clear it so credentials come from the real Roles Anywhere endpoint.");
+        }
+
+        if (!isDevelopment && rolesAnywhere.UseSimulatorProtocol)
+        {
+            failures.Add(
+                $"Gateway:Aws:RolesAnywhere:UseSimulatorProtocol is true in the " +
+                $"'{environment.EnvironmentName}' environment. The simulator does not verify AWS4-X509 " +
+                "signatures; it is a Development wiring aid only.");
+        }
+
+        ValidateCertificate(rolesAnywhere.Certificate, failures);
+    }
+
+    private static void ValidateCertificate(CertificateOptions certificate, List<string> failures)
+    {
+        // The thumbprint is a placeholder in the shipped templates too, and it is easy to
+        // substitute the ARNs and forget it -- the certificate is installed by a different
+        // step, often by a different person.
+        if (certificate.Thumbprint.Contains('<') || certificate.Thumbprint.Contains('>'))
+        {
+            failures.Add(
+                "Gateway:Aws:RolesAnywhere:Certificate:Thumbprint still contains a placeholder " +
+                $"('{certificate.Thumbprint}'). Substitute the installed certificate's thumbprint.");
+        }
+
+        switch (certificate.Source)
+        {
+            case CertificateSource.WindowsStore when string.IsNullOrWhiteSpace(certificate.Thumbprint):
+                failures.Add(
+                    "Gateway:Aws:RolesAnywhere:Certificate:Thumbprint is required when Source is 'WindowsStore'.");
+                break;
+
+            case CertificateSource.PemFile when
+                string.IsNullOrWhiteSpace(certificate.CertificatePath) ||
+                string.IsNullOrWhiteSpace(certificate.PrivateKeyPath):
+                failures.Add(
+                    "Gateway:Aws:RolesAnywhere:Certificate needs both CertificatePath and PrivateKeyPath " +
+                    "when Source is 'PemFile'.");
+                break;
+
+            case CertificateSource.PfxFile when string.IsNullOrWhiteSpace(certificate.PfxPath):
+                failures.Add("Gateway:Aws:RolesAnywhere:Certificate:PfxPath is required when Source is 'PfxFile'.");
+                break;
+        }
+    }
 }

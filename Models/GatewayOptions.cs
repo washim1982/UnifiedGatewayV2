@@ -24,6 +24,27 @@ public class AwsOptions
     public bool UseLocalProfile { get; set; } = false;
     public string? ExternalId { get; set; }
     public int RefreshBufferMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// How this host obtains AWS credentials. <see cref="AwsCredentialSource.Auto"/> keeps the
+    /// behaviour of configuration written before this setting existed; Test and Production
+    /// must name <see cref="AwsCredentialSource.RolesAnywhere"/> explicitly.
+    /// </summary>
+    public AwsCredentialSource CredentialSource { get; set; } = AwsCredentialSource.Auto;
+
+    /// <summary>IAM Roles Anywhere settings, used when <see cref="CredentialSource"/> selects it.</summary>
+    public RolesAnywhereOptions RolesAnywhere { get; set; } = new();
+
+    /// <summary>
+    /// The source actually in force, after <see cref="AwsCredentialSource.Auto"/> is resolved
+    /// against the older fields.
+    /// </summary>
+    public AwsCredentialSource EffectiveCredentialSource => CredentialSource switch
+    {
+        AwsCredentialSource.Auto when UseLocalProfile => AwsCredentialSource.LocalProfile,
+        AwsCredentialSource.Auto => AwsCredentialSource.AssumeRole,
+        _ => CredentialSource
+    };
 }
 
 public class LocalProvidersOptions

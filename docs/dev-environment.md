@@ -18,7 +18,7 @@ Development runs against [`DOTNET_AWS_SIMULATOR`](../../../workspace/Projects/DO
 
 | Environment | Provider | Backing services |
 | :--- | :--- | :--- |
-| Development | `LocalDotNet` | S3Local `:5001`, KmsLocal `:5002`, IamLocal `:5003` |
+| Development | `LocalDotNet` (Bedrock: `Aws`) | S3Local `:5001`, KmsLocal `:5002`, IamLocal `:5003`, **real Bedrock Runtime** |
 | Test | `Aws` | KMS, Secrets Manager, IAM, Bedrock |
 | Production | `Aws` | KMS, Secrets Manager, IAM, Bedrock |
 
@@ -36,7 +36,7 @@ Your simulator already had the right idea — `IObjectStoreClient` / `IKmsClient
 | `ISecretsProvider` | KMS-encrypted objects in S3Local | Secrets Manager |
 | `IAccessControlProvider` | `policies` claim from IamLocal, evaluated locally | IAM policy documents |
 | `IIdentityProvider` | IamLocal `/get-caller-identity` | Upstream-asserted principal |
-| Bedrock | *(not simulated — see §5)* | Bedrock Runtime |
+| Bedrock | **Real Bedrock Runtime**, via the developer's `~/.aws` profile | Bedrock Runtime, via the assumed role |
 
 **Secrets** were the one missing piece: the .NET simulator has no Secrets Manager equivalent. Rather than store them in the clear, the gateway uses the S3 + KMS envelope pattern — the value is encrypted through `ICryptoProvider` before it is written, so the object at rest is ciphertext even in dev. Verified: reading `s3://gateway-secrets/gateway/dev/admin-api-key` directly returns base64 ciphertext, not the `ug_live_…` key.
 
@@ -108,7 +108,7 @@ Which now matches the production matrix exactly.
 
 ## 5. Gaps to be aware of
 
-- **No Bedrock.** The .NET simulator does not emulate Bedrock, so `BedrockServiceUrl` is empty in Development and applications should route through the `local` provider (Ollama) instead. Cloud-model paths are therefore not exercised in dev. The Python simulator does emulate Bedrock if you need that specific coverage.
+- **Bedrock in dev costs real money.** Development calls the real Bedrock Runtime (see §7), so every invocation is billed to whatever account the `~/.aws` profile belongs to. That is the deliberate trade: no local stand-in produces the model output being developed against. Route an application through the `local` provider (Ollama) when the model itself is not what is under test.
 - **Dev keys are dev keys.** KmsLocal protects its master key with DPAPI or a dev key file. Fine locally, meaningless as a security control.
 - **Test now needs real AWS.** Test was previously pointed at the Python simulator; it is now `Aws`, so running the Test environment locally requires credentials, or flipping `Provider` back for a local run.
 - **The Python simulator integration is still in the codebase** (`Provider: "Simulator"`, `Services/Cloud/Simulator/`). No shipped configuration uses it any more. It can be deleted if that project is retired.
@@ -124,3 +124,69 @@ Two things worth attention:
 1. **`run-simulator.ps1` starts services with `Start-Process ... -NoNewWindow` and stops them by process name.** `Stop-Process -Name IamLocal,KmsLocal,S3Local` will not match, because the running process is `dotnet`, not the project name. The `$processes` fallback catches the launcher, but a `dotnet run` host process can outlive it — I saw orphaned listeners holding ports after a stop. Launching the built DLLs, or tracking child PIDs, would make shutdown reliable.
 
 2. **The `IRolesAnywhereService` DI lifetime.** I hit `Cannot consume scoped service 'IRoleStore' from singleton 'IRolesAnywhereService'` on a stale build; the current source already registers it `Scoped`, so this appears fixed. Flagging it only because a stale `bin/` will reproduce it — worth a clean rebuild to confirm.
+
+---
+
+## 7. Bedrock in Development
+
+Bedrock is the one seam that does **not** follow `Gateway:Cloud:Provider`. The control plane
+(S3, KMS, IAM) is a contract a simulator can reproduce faithfully, and a wrong answer there is
+a bug you can see. Model output is different: it is the thing under development, and a stub of
+it tests nothing. So Development binds the control plane to the local simulator and sends model
+calls to the real service.
+
+```jsonc
+// appsettings.Development.json
+"Gateway": {
+  "Aws":   { "UseLocalProfile": true, "LocalProfileName": "default", "Region": "us-east-1" },
+  "Cloud": { "Provider": "LocalDotNet", "BedrockProvider": "Aws", "BedrockServiceUrl": "" }
+}
+```
+
+`BedrockProvider` overrides `Provider` for Bedrock alone; leave it out and Bedrock inherits the
+global switch. Test and Production omit the key entirely, so Bedrock inherits `Provider: "Aws"`
+there and this dev-only override disappears along with the file — no code path differs.
+
+### What you need locally
+
+1. A profile in `~/.aws/credentials` or `~/.aws/config` named by `LocalProfileName`.
+2. That principal needs `bedrock:InvokeModel` in `Region`.
+3. Model access granted for the specific model in the Bedrock console — it is per-model and
+   per-region, and a fresh account has none of it.
+
+### When it is not set up
+
+The gateway starts normally; only Bedrock calls fail, and they fail with a named cause rather
+than a correlation id:
+
+```json
+{ "code": "BEDROCK_CREDENTIALS_UNAVAILABLE",
+  "message": "Bedrock is configured to use the real AWS service, but the credentials were missing or rejected.",
+  "details": "Configured credential source: the local AWS profile 'default' (Gateway:Aws:LocalProfileName), ..." }
+```
+
+This is deliberate. Everything else Bedrock can throw is infrastructure a caller cannot act on
+and gets the usual opaque `BEDROCK_INVOCATION_FAILED` plus a reference; a missing profile is
+local setup, and hiding it behind a log lookup costs far more than it protects. The message
+names config keys and a profile name only — never the account id or role ARN.
+
+Note that a missing profile does **not** fail loudly at startup: the SDK resolves credentials
+lazily, handing back an instance-metadata credential object that only fails when first used to
+sign. `AwsCredentialBackgroundService` will still log "Initial AWS credentials loaded
+successfully" in that state.
+
+### Guards
+
+`StartupValidator` refuses to start on the combinations that would be wrong:
+
+| Configuration | Refused because |
+| :--- | :--- |
+| `Provider: LocalDotNet` with no `BedrockProvider` | The .NET simulator has no Bedrock at all; every model call would fail at the transport layer with nothing naming the cause. |
+| Bedrock resolves to `Aws` **and** `BedrockServiceUrl` is set | A leftover simulator URL would send "real" traffic to localhost. |
+| Bedrock resolves to `Simulator` **and** `BedrockServiceUrl` is empty | The SDK would call the real regional endpoint with simulated credentials. |
+| `UseLocalProfile: true` outside Development | A developer's own credential is not an identity a shared host may run as; Test and Production assume a role instead. |
+
+### Cost
+
+Every dev invocation is billed to the profile's account. Point an application at the `local`
+provider (Ollama) whenever the model itself is not what is being tested.

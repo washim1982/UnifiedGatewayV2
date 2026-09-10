@@ -252,7 +252,18 @@ public static class DashboardEndpoints
             IApplicationRegistryService registry,
             CancellationToken ct) =>
         {
-            var result = await router.RouteAppRequestAsync(appId, request, ct);
+            // The dashboard tester runs as the signed-in operator, so the invocation is
+            // attributed to them rather than to the application it exercises.
+            var caller = new CallerContext
+            {
+                Actor = ctx.User.FindFirst(GatewayAuth.PrincipalArnClaim)?.Value
+                        ?? ctx.User.FindFirst(ClaimTypes.NameIdentifier)?.Value,
+                AuthType = ctx.User.FindFirst(GatewayAuth.AuthTypeClaim)?.Value,
+                SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+                TraceId = ctx.TraceIdentifier
+            };
+
+            var result = await router.RouteAppRequestAsync(appId, request, caller, ct);
             await registry.RecordManagementActionAsync(
                 Audit(ctx, "TestApplication", appId, result.Error is null), ct);
 

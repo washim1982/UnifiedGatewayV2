@@ -29,7 +29,11 @@ public class ModelRouter : IModelRouter
         _logger = logger;
     }
 
-    public async Task<UniversalResponse> RouteAppRequestAsync(string appId, InvokeAppRequest request, CancellationToken cancellationToken = default)
+    public async Task<UniversalResponse> RouteAppRequestAsync(
+        string appId,
+        InvokeAppRequest request,
+        CallerContext? caller = null,
+        CancellationToken cancellationToken = default)
     {
         var app = await _registryService.GetAppAsync(appId, cancellationToken);
         if (app == null)
@@ -77,18 +81,23 @@ public class ModelRouter : IModelRouter
             }
         };
 
-        return await RouteWithFallbackAsync(universalReq, app.FallbackProvider, app.FallbackModel, cancellationToken);
+        return await RouteWithFallbackAsync(
+            universalReq, app.FallbackProvider, app.FallbackModel, caller, cancellationToken);
     }
 
-    public async Task<UniversalResponse> RouteAsync(UniversalRequest request, CancellationToken cancellationToken = default)
+    public async Task<UniversalResponse> RouteAsync(
+        UniversalRequest request,
+        CallerContext? caller = null,
+        CancellationToken cancellationToken = default)
     {
-        return await RouteWithFallbackAsync(request, null, null, cancellationToken);
+        return await RouteWithFallbackAsync(request, null, null, caller, cancellationToken);
     }
 
     private async Task<UniversalResponse> RouteWithFallbackAsync(
         UniversalRequest request,
         string? fallbackProvider,
         string? fallbackModel,
+        CallerContext? caller,
         CancellationToken cancellationToken)
     {
         var overallStopwatch = Stopwatch.StartNew();
@@ -117,7 +126,7 @@ public class ModelRouter : IModelRouter
                 }
             };
 
-            await RecordTelemetryAsync(request, tooLarge, false, PassthroughGuardrail(request.Input));
+            await RecordTelemetryAsync(request, tooLarge, false, PassthroughGuardrail(request.Input), caller);
             return tooLarge;
         }
 
@@ -158,7 +167,7 @@ public class ModelRouter : IModelRouter
                 }
             };
 
-            await RecordTelemetryAsync(request, blockedRes, false, guardrailResult);
+            await RecordTelemetryAsync(request, blockedRes, false, guardrailResult, caller);
             return blockedRes;
         }
 
@@ -184,7 +193,13 @@ public class ModelRouter : IModelRouter
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Primary provider '{Provider}' failed with exception for model '{Model}'", primaryProvider, primaryModel);
+            // The exception text can name internal hosts, ARNs and provider internals, so
+            // it is logged against the correlation id and the caller is given the id only.
+            var reference = caller?.TraceId ?? Guid.NewGuid().ToString("N");
+            _logger.LogWarning(ex,
+                "Primary provider '{Provider}' failed for model '{Model}'. Reference {Reference}.",
+                primaryProvider, primaryModel, reference);
+
             response = new UniversalResponse
             {
                 Output = string.Empty,
@@ -193,7 +208,8 @@ public class ModelRouter : IModelRouter
                 Error = new GatewayError
                 {
                     Code = "PRIMARY_PROVIDER_FAILED",
-                    Message = ex.Message
+                    Message = "The model provider could not be reached.",
+                    Details = $"Reference: {reference}"
                 }
             };
         }
@@ -204,7 +220,7 @@ public class ModelRouter : IModelRouter
             overallStopwatch.Stop();
             var (finalRes, outputScan) = await ApplyOutputGuardrailsAsync(
                 response with { LatencyMs = overallStopwatch.ElapsedMilliseconds }, cancellationToken);
-            await RecordTelemetryAsync(sanitizedReq, finalRes, false, guardrailResult, outputScan);
+            await RecordTelemetryAsync(sanitizedReq, finalRes, false, guardrailResult, caller, outputScan);
             return finalRes;
         }
 
@@ -243,11 +259,14 @@ public class ModelRouter : IModelRouter
                         },
                         cancellationToken);
 
-                    await RecordTelemetryAsync(sanitizedReq, finalFallback, true, guardrailResult, fallbackScan);
+                    await RecordTelemetryAsync(sanitizedReq, finalFallback, true, guardrailResult, caller, fallbackScan);
                     return finalFallback;
                 }
 
-                _logger.LogError("Both primary and fallback providers failed for request.");
+                _logger.LogError(
+                    "Both providers failed. Primary: {Primary}. Fallback: {Fallback}. Reference {Reference}.",
+                    response.Error?.Message, fallbackResponse.Error?.Message,
+                    caller?.TraceId ?? "unavailable");
                 overallStopwatch.Stop();
                 var dualFailure = response with
                 {
@@ -255,10 +274,11 @@ public class ModelRouter : IModelRouter
                     Error = new GatewayError
                     {
                         Code = "ALL_PROVIDERS_FAILED",
-                        Message = $"Primary failed: [{response.Error?.Message}]. Fallback failed: [{fallbackResponse.Error?.Message}]"
+                        Message = "Both the primary and fallback model providers failed.",
+                        Details = $"Reference: {caller?.TraceId ?? "unavailable"}"
                     }
                 };
-                await RecordTelemetryAsync(sanitizedReq, dualFailure, false, guardrailResult);
+                await RecordTelemetryAsync(sanitizedReq, dualFailure, false, guardrailResult, caller);
                 return dualFailure;
             }
             catch (Exception ex)
@@ -269,7 +289,7 @@ public class ModelRouter : IModelRouter
 
         overallStopwatch.Stop();
         var failureRes = response with { LatencyMs = overallStopwatch.ElapsedMilliseconds };
-        await RecordTelemetryAsync(sanitizedReq, failureRes, false, guardrailResult);
+        await RecordTelemetryAsync(sanitizedReq, failureRes, false, guardrailResult, caller);
         return failureRes;
     }
 
@@ -387,6 +407,7 @@ public class ModelRouter : IModelRouter
         UniversalResponse res,
         bool fallbackUsed,
         GuardrailResult guardrailResult,
+        CallerContext? caller = null,
         GuardrailResult? outputScan = null)
     {
         try
@@ -406,7 +427,14 @@ public class ModelRouter : IModelRouter
                 GuardrailAction = guardrailResult.ActionTaken,
                 GuardrailViolations = guardrailResult.Violations.Select(v => $"{v.Category}:{v.RuleName}").ToList(),
                 Timestamp = DateTimeOffset.UtcNow,
-                ErrorMessage = res.Error?.Message
+                ErrorMessage = res.Error?.Message,
+
+                // Attribution: without these the trail says what ran but not who ran it.
+                Actor = caller?.Actor,
+                AuthType = caller?.AuthType,
+                TokenId = caller?.TokenId,
+                SourceIp = caller?.SourceIp,
+                TraceId = caller?.TraceId ?? req.Metadata?.TraceId
             };
 
             await _registryService.RecordMetricAsync(log);

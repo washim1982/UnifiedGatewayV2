@@ -55,9 +55,13 @@ public class LocalModelService : ILocalModelService
         catch (HttpRequestException ex)
         {
             stopwatch.Stop();
-            _logger.LogError(ex, "Local model endpoint unreachable for model {Model}", model);
+            // The transport error can carry an internal hostname and port; keep it in the log.
+            var reference = request.Metadata?.TraceId ?? Guid.NewGuid().ToString("N");
+            _logger.LogError(ex,
+                "Local model endpoint unreachable for model {Model}. Reference {Reference}.", model, reference);
+
             return CreateErrorResponse(request, model, stopwatch.ElapsedMilliseconds, "LOCAL_ENDPOINT_UNAVAILABLE",
-                $"Could not connect to local model backend: {ex.Message}");
+                $"The local model backend could not be reached. Reference: {reference}");
         }
         catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
@@ -82,8 +86,12 @@ public class LocalModelService : ILocalModelService
         catch (Exception ex)
         {
             stopwatch.Stop();
-            _logger.LogError(ex, "Local model invocation failed unexpectedly for model {Model}", model);
-            return CreateErrorResponse(request, model, stopwatch.ElapsedMilliseconds, "LOCAL_INVOCATION_FAILED", ex.Message);
+            var reference = request.Metadata?.TraceId ?? Guid.NewGuid().ToString("N");
+            _logger.LogError(ex,
+                "Local model invocation failed for model {Model}. Reference {Reference}.", model, reference);
+
+            return CreateErrorResponse(request, model, stopwatch.ElapsedMilliseconds, "LOCAL_INVOCATION_FAILED",
+                $"The local model invocation failed. Reference: {reference}");
         }
     }
 

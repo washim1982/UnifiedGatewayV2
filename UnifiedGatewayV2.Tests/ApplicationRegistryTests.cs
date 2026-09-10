@@ -92,11 +92,11 @@ public class ApplicationRegistryTests
 
         var created = await _registryService.CreateAppAsync(createReq);
 
-        var (isValidCorrect, app) = await _registryService.AuthenticateAppAsync("auth-test-app", created.ApiKey);
+        var (isValidCorrect, app, _) = await _registryService.AuthenticateAppAsync("auth-test-app", created.ApiKey);
         Assert.True(isValidCorrect);
         Assert.NotNull(app);
 
-        var (isValidWrong, _) = await _registryService.AuthenticateAppAsync("auth-test-app", "invalid-key");
+        var (isValidWrong, _, _) = await _registryService.AuthenticateAppAsync("auth-test-app", "invalid-key");
         Assert.False(isValidWrong);
     }
 
@@ -114,7 +114,7 @@ public class ApplicationRegistryTests
         var created = await _registryService.CreateAppAsync(createReq);
 
         // Authenticate using the generated initial STS token
-        var (isValidSts, app) = await _registryService.AuthenticateAppAsync("sts-auth-app", created.StsToken);
+        var (isValidSts, app, _) = await _registryService.AuthenticateAppAsync("sts-auth-app", created.StsToken);
         Assert.True(isValidSts);
         Assert.NotNull(app);
         Assert.Equal("sts-auth-app", app.AppId);
@@ -127,7 +127,7 @@ public class ApplicationRegistryTests
         var app2 = await _registryService.CreateAppAsync(new CreateAppRequest { AppId = "app-two", Name = "App Two" });
 
         // Attempt to invoke app-two using app-one's STS token
-        var (isValid, _) = await _registryService.AuthenticateAppAsync("app-two", app1.StsToken);
+        var (isValid, _, _) = await _registryService.AuthenticateAppAsync("app-two", app1.StsToken);
         Assert.False(isValid);
     }
 
@@ -138,7 +138,7 @@ public class ApplicationRegistryTests
 
         var (adminToken, _) = await _securityService.IssueAppStsTokenAsync("*", TimeSpan.FromMinutes(30), "invoke", isAdmin: true);
 
-        var (isValid, app) = await _registryService.AuthenticateAppAsync("target-app", adminToken);
+        var (isValid, app, _) = await _registryService.AuthenticateAppAsync("target-app", adminToken);
         Assert.True(isValid);
         Assert.NotNull(app);
     }
@@ -166,7 +166,7 @@ public class ApplicationRegistryTests
         Assert.False(tokenResp.IsAdmin);
 
         // Verify the newly exchanged STS token works for authentication
-        var (isValid, _) = await _registryService.AuthenticateAppAsync("exchange-app", tokenResp.Token);
+        var (isValid, _, _) = await _registryService.AuthenticateAppAsync("exchange-app", tokenResp.Token);
         Assert.True(isValid);
     }
 
@@ -205,7 +205,7 @@ public class ApplicationRegistryTests
         });
 
         var oldKey = created.ApiKey;
-        var (oldWorksBefore, _) = await _registryService.AuthenticateAppAsync("rotate-app", oldKey);
+        var (oldWorksBefore, _, _) = await _registryService.AuthenticateAppAsync("rotate-app", oldKey);
         Assert.True(oldWorksBefore);
 
         var newKey = await _registryService.RotateApiKeyAsync("rotate-app");
@@ -215,11 +215,11 @@ public class ApplicationRegistryTests
         Assert.NotEqual(oldKey, newKey);
 
         // The rotated key authenticates; the previous one no longer does.
-        var (newWorks, app) = await _registryService.AuthenticateAppAsync("rotate-app", newKey);
+        var (newWorks, app, _) = await _registryService.AuthenticateAppAsync("rotate-app", newKey);
         Assert.True(newWorks);
         Assert.NotNull(app);
 
-        var (oldWorksAfter, _) = await _registryService.AuthenticateAppAsync("rotate-app", oldKey);
+        var (oldWorksAfter, _, _) = await _registryService.AuthenticateAppAsync("rotate-app", oldKey);
         Assert.False(oldWorksAfter);
     }
 
