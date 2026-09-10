@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services.Cloud;
+using UnifiedGateway.Services.Telemetry;
 
 namespace UnifiedGateway.Services;
 
@@ -15,11 +16,11 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
     private readonly ISecurityService _securityService;
     private readonly IAdminCredentialService _adminCredentials;
     private readonly GatewayOptions _options;
+    private readonly BillingOptions _billing;
     private readonly ILogger<ApplicationRegistryService> _logger;
+    private readonly IAuditStore _auditStore;
     private readonly SemaphoreSlim _fileLock = new(1, 1);
-    private readonly SemaphoreSlim _auditLock = new(1, 1);
     private readonly string _registryFilePath;
-    private readonly string _auditDirectory;
 
     private static readonly JsonSerializerOptions AuditJsonOpts = new()
     {
@@ -37,10 +38,14 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         ISecurityService securityService,
         IAdminCredentialService adminCredentials,
         IOptions<GatewayOptions> options,
+        IOptions<BillingOptions> billingOptions,
+        IAuditStore auditStore,
         ILogger<ApplicationRegistryService> logger)
     {
         _securityService = securityService;
         _adminCredentials = adminCredentials;
+        _billing = billingOptions.Value;
+        _auditStore = auditStore;
         _options = options.Value;
         _logger = logger;
 
@@ -48,123 +53,42 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         Directory.CreateDirectory(dataDir);
         _registryFilePath = Path.Combine(dataDir, _options.Storage.RegistryFileName);
 
-        var auditDir = _options.Storage.AuditDirectory;
-        _auditDirectory = Path.IsPathRooted(auditDir)
-            ? auditDir
-            : Path.Combine(dataDir, string.IsNullOrWhiteSpace(auditDir) ? "audit" : auditDir);
-
         InitializeRegistry();
-        InitializeAuditTrail();
     }
 
-    #region Persistent Audit Trail
+    #region Durable Audit Trail
 
-    private string CurrentAuditFilePath =>
-        Path.Combine(_auditDirectory, $"audit-{DateTime.UtcNow:yyyyMMdd}.jsonl");
+    // The trail lives in object storage (S3Local in dev, S3 in test and production), not on
+    // the local disk: billing and telemetry are both built from it, so it has to outlive any
+    // single host and be readable by anything else that needs the same numbers.
 
     /// <summary>
-    /// Prepares the append-only audit directory, prunes expired files, and rehydrates the
-    /// in-memory recent-log buffer so telemetry survives a process restart.
+    /// Reloads the recent-metrics buffer from the trail so the telemetry view is not blank
+    /// after a restart. Best effort: a slow or unavailable store must not block startup.
     /// </summary>
-    private void InitializeAuditTrail()
+    public async Task RehydrateRecentLogsAsync(CancellationToken cancellationToken = default)
     {
         if (!_options.Storage.AuditLogEnabled) return;
 
         try
         {
-            Directory.CreateDirectory(_auditDirectory);
-            PruneExpiredAuditFiles();
-            RehydrateRecentLogs();
+            var to = DateTimeOffset.UtcNow;
+            var entries = await _auditStore.ReadInvocationsAsync(to.AddDays(-2), to, cancellationToken);
+
+            foreach (var entry in entries.OrderBy(e => e.Timestamp).TakeLast(MaxLogHistory))
+            {
+                _recentLogs.Enqueue(entry);
+            }
+
+            if (entries.Count > 0)
+            {
+                _logger.LogInformation("Rehydrated {Count} audit entries from object storage.",
+                    Math.Min(entries.Count, MaxLogHistory));
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to initialize the persistent audit trail at {Path}", _auditDirectory);
-        }
-    }
-
-    private void PruneExpiredAuditFiles()
-    {
-        var retentionDays = _options.Storage.AuditRetentionDays;
-        if (retentionDays <= 0) return;
-
-        var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
-        foreach (var file in Directory.EnumerateFiles(_auditDirectory, "audit-*.jsonl"))
-        {
-            try
-            {
-                if (File.GetLastWriteTimeUtc(file) < cutoff)
-                {
-                    File.Delete(file);
-                    _logger.LogInformation("Pruned expired audit file {File}", Path.GetFileName(file));
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Could not prune audit file {File}", file);
-            }
-        }
-    }
-
-    /// <summary>Loads the most recent audit entries back into the in-memory metrics buffer.</summary>
-    private void RehydrateRecentLogs()
-    {
-        var recentFiles = Directory.EnumerateFiles(_auditDirectory, "audit-*.jsonl")
-            .OrderByDescending(f => f)
-            .Take(2)
-            .OrderBy(f => f)
-            .ToList();
-
-        if (recentFiles.Count == 0) return;
-
-        var entries = new List<RequestLogEntry>();
-        foreach (var file in recentFiles)
-        {
-            foreach (var line in File.ReadLines(file))
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                if (line.Contains("\"kind\":\"management\"", StringComparison.Ordinal)) continue;
-                try
-                {
-                    var entry = JsonSerializer.Deserialize<RequestLogEntry>(line, AuditJsonOpts);
-                    if (entry != null) entries.Add(entry);
-                }
-                catch (JsonException)
-                {
-                    // Skip a torn or malformed trailing line rather than failing startup.
-                }
-            }
-        }
-
-        foreach (var entry in entries.TakeLast(MaxLogHistory))
-        {
-            _recentLogs.Enqueue(entry);
-        }
-
-        if (entries.Count > 0)
-        {
-            _logger.LogInformation("Rehydrated {Count} audit entries from disk.", Math.Min(entries.Count, MaxLogHistory));
-        }
-    }
-
-    /// <summary>Appends one entry to the append-only audit trail. Never throws into the request path.</summary>
-    private async Task AppendAuditEntryAsync(RequestLogEntry log, CancellationToken cancellationToken)
-    {
-        if (!_options.Storage.AuditLogEnabled) return;
-
-        await _auditLock.WaitAsync(cancellationToken);
-        try
-        {
-            Directory.CreateDirectory(_auditDirectory);
-            var line = JsonSerializer.Serialize(log, AuditJsonOpts);
-            await File.AppendAllTextAsync(CurrentAuditFilePath, line + Environment.NewLine, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to append entry to the persistent audit trail.");
-        }
-        finally
-        {
-            _auditLock.Release();
+            _logger.LogWarning(ex, "Could not rehydrate recent telemetry from object storage.");
         }
     }
 
@@ -312,6 +236,8 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
             MaxTokens = request.MaxTokens,
             FallbackProvider = request.FallbackProvider,
             FallbackModel = request.FallbackModel,
+            InputCostPerMillion = request.InputCostPerMillion,
+            OutputCostPerMillion = request.OutputCostPerMillion,
             Version = 1,
             IsActive = true,
             CreatedAt = DateTimeOffset.UtcNow,
@@ -356,6 +282,8 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
             SystemPrompt = existing.SystemPrompt,
             Temperature = existing.Temperature,
             MaxTokens = existing.MaxTokens,
+            InputCostPerMillion = existing.InputCostPerMillion,
+            OutputCostPerMillion = existing.OutputCostPerMillion,
             SavedAt = existing.UpdatedAt
         };
 
@@ -373,6 +301,8 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
             FallbackProvider = request.FallbackProvider ?? existing.FallbackProvider,
             FallbackModel = request.FallbackModel ?? existing.FallbackModel,
             IsActive = request.IsActive ?? existing.IsActive,
+            InputCostPerMillion = request.InputCostPerMillion ?? existing.InputCostPerMillion,
+            OutputCostPerMillion = request.OutputCostPerMillion ?? existing.OutputCostPerMillion,
             Version = existing.Version + 1,
             UpdatedAt = DateTimeOffset.UtcNow,
             VersionHistory = history
@@ -593,38 +523,79 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
 
     public async Task RecordManagementActionAsync(ManagementAuditEntry entry, CancellationToken cancellationToken = default)
     {
-        if (!_options.Storage.AuditLogEnabled) return;
-
-        await _auditLock.WaitAsync(cancellationToken);
-        try
+        if (_options.Storage.AuditLogEnabled)
         {
-            Directory.CreateDirectory(_auditDirectory);
-            var line = JsonSerializer.Serialize(entry, AuditJsonOpts);
-            await File.AppendAllTextAsync(CurrentAuditFilePath, line + Environment.NewLine, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to append a management action to the audit trail.");
-        }
-        finally
-        {
-            _auditLock.Release();
+            await _auditStore.AppendManagementAsync(entry, cancellationToken);
         }
 
         _logger.LogInformation("Management action {Action} on {Resource} by {Actor} (success={Success})",
             entry.Action, entry.Resource ?? "-", entry.Actor ?? "unknown", entry.Success);
     }
+    /// <summary>
+    /// Stamps the charge for a request onto its audit entry using the rate card in force
+    /// right now. Freezing both the cost and the rates that produced it means a later price
+    /// change cannot silently restate past invoices, and an auditor can see how any line
+    /// was arrived at.
+    /// </summary>
+    private RequestLogEntry PriceEntry(RequestLogEntry log)
+    {
+        decimal inputRate = 0m;
+        decimal outputRate = 0m;
+        var isEstimated = true;
 
+        if (!string.IsNullOrWhiteSpace(log.AppId) && _apps.TryGetValue(log.AppId, out var app))
+        {
+            if (app.InputCostPerMillion > 0m || app.OutputCostPerMillion > 0m)
+            {
+                inputRate = app.InputCostPerMillion;
+                outputRate = app.OutputCostPerMillion;
+                isEstimated = false;
+            }
+        }
+
+        if (isEstimated)
+        {
+            // No rate card: fall back to the configured default and mark the line so the
+            // bill never presents a guess as a contracted rate.
+            inputRate = _billing.DefaultInputCostPerMillion;
+            outputRate = _billing.DefaultOutputCostPerMillion;
+        }
+
+        return log with
+        {
+            InputCost = CostFor(log.InputTokens, inputRate),
+            OutputCost = CostFor(log.OutputTokens, outputRate),
+            InputRatePerMillion = inputRate,
+            OutputRatePerMillion = outputRate,
+            IsEstimatedCost = isEstimated
+        };
+    }
+
+    /// <summary>
+    /// Cost of a token count at a per-million rate, rounded to six decimal places.
+    /// Individual calls are fractions of a cent, so rounding to currency precision here
+    /// would floor almost every line to zero; the rounding to cents happens on the total.
+    /// </summary>
+    private static decimal CostFor(int tokens, decimal ratePerMillion)
+    {
+        if (tokens <= 0 || ratePerMillion <= 0m) return 0m;
+        return Math.Round(tokens / 1_000_000m * ratePerMillion, 6, MidpointRounding.AwayFromZero);
+    }
     public async Task RecordMetricAsync(RequestLogEntry log, CancellationToken cancellationToken = default)
     {
+        log = PriceEntry(log);
+
         _recentLogs.Enqueue(log);
         while (_recentLogs.Count > MaxLogHistory)
         {
             _recentLogs.TryDequeue(out _);
         }
 
-        // Durable, append-only audit trail (survives restarts).
-        await AppendAuditEntryAsync(log, cancellationToken);
+        // Durable trail in object storage; billing and telemetry both read it back.
+        if (_options.Storage.AuditLogEnabled)
+        {
+            await _auditStore.AppendAsync(log, cancellationToken);
+        }
     }
 
     public Task<GatewayMetricsSummary> GetMetricsSummaryAsync(CancellationToken cancellationToken = default)

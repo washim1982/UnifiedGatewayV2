@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
+using UnifiedGateway.Services.Telemetry;
 using UnifiedGateway.Startup;
 using Xunit;
 
@@ -227,6 +228,37 @@ public class HardeningTests
         StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Test" });
     }
 
+    // --- Provider binding guards ---------------------------------------------------
+
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Staging")]
+    [InlineData("Test")]
+    public void Startup_RefusesTheDotNetSimulatorOutsideDevelopment(string environmentName)
+    {
+        var gateway = new GatewayOptions();
+        gateway.Security.RequireHttps = false;
+        gateway.Security.AllowedCorsOrigins = ["https://gateway.enterprise.internal"];
+
+        var cloud = new CloudOptions { Provider = CloudProviderMode.LocalDotNet };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = environmentName }));
+
+        Assert.Contains("LocalDotNet", ex.Message);
+    }
+
+    [Fact]
+    public void Startup_AcceptsTheDotNetSimulatorInDevelopment()
+    {
+        var gateway = new GatewayOptions();
+        gateway.Security.RequireHttps = false;
+        gateway.Security.AllowedCorsOrigins = ["http://localhost:3000"];
+
+        var cloud = new CloudOptions { Provider = CloudProviderMode.LocalDotNet };
+
+        StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Development" });
+    }
     // --- L2: appId charset ------------------------------------------------------------
 
     [Theory]
@@ -287,6 +319,8 @@ public class HardeningTests
             security,
             new StubAdminCredentialService(security, adminKey),
             Options.Create(options),
+            Options.Create(new BillingOptions()),
+            new S3AuditStore(new InMemoryObjectStore(), Options.Create(new CloudOptions()), NullLogger<S3AuditStore>.Instance),
             NullLogger<ApplicationRegistryService>.Instance);
     }
 }

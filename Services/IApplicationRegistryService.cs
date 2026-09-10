@@ -20,6 +20,12 @@ public interface IApplicationRegistryService
     Task<AppStsTokenResponse> MintStsTokenDirectAsync(string appId, int durationSeconds = 3600, string scope = "invoke", bool isAdmin = false, string? callerId = null, CancellationToken cancellationToken = default);
     Task RecordMetricAsync(RequestLogEntry log, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reloads the recent-metrics buffer from the durable trail. Called once object
+    /// storage is confirmed reachable, so the telemetry view is not blank after a restart.
+    /// </summary>
+    Task RehydrateRecentLogsAsync(CancellationToken cancellationToken = default);
+
     /// <summary>Appends a privileged management action to the durable audit trail.</summary>
     Task RecordManagementActionAsync(ManagementAuditEntry entry, CancellationToken cancellationToken = default);
     Task<GatewayMetricsSummary> GetMetricsSummaryAsync(CancellationToken cancellationToken = default);

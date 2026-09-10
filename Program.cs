@@ -11,8 +11,10 @@ using UnifiedGateway.Models;
 using UnifiedGateway.Services;
 using UnifiedGateway.Services.Cloud;
 using UnifiedGateway.Services.Cloud.Aws;
+using UnifiedGateway.Services.Cloud.LocalDotNet;
 using UnifiedGateway.Services.Cloud.Simulator;
 using UnifiedGateway.Services.Okta;
+using UnifiedGateway.Services.Telemetry;
 using UnifiedGateway.Startup;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -26,6 +28,8 @@ builder.Services.Configure<CloudOptions>(
     builder.Configuration.GetSection(CloudOptions.SectionName));
 builder.Services.Configure<OktaOptions>(
     builder.Configuration.GetSection(OktaOptions.SectionName));
+builder.Services.Configure<BillingOptions>(
+    builder.Configuration.GetSection(BillingOptions.SectionName));
 
 var gatewayOptions = builder.Configuration
     .GetSection(GatewayOptions.SectionName)
@@ -65,19 +69,58 @@ builder.Services.AddHttpClient(SimulatorClients.Iam, client =>
     client.DefaultRequestHeaders.Add("X-Simulator-Role", cloudOptions.Simulator.CallerRoleName);
 });
 
-if (cloudOptions.Provider == CloudProviderMode.Simulator)
+// The .NET local AWS simulator (DOTNET_AWS_SIMULATOR). Registered unconditionally so the
+// clients exist; only the Provider switch decides whether anything resolves to them.
+var localDotNetTimeout = TimeSpan.FromSeconds(Math.Max(1, cloudOptions.LocalDotNet.TimeoutSeconds));
+
+builder.Services.AddHttpClient(LocalDotNetClients.Kms, c =>
 {
-    builder.Services.AddSingleton<ISecretsProvider, SimulatorSecretsProvider>();
-    builder.Services.AddSingleton<ICryptoProvider, SimulatorCryptoProvider>();
-    builder.Services.AddSingleton<IAccessControlProvider, SimulatorAccessControlProvider>();
-    builder.Services.AddSingleton<IIdentityProvider, SimulatorIdentityProvider>();
-}
-else
+    c.BaseAddress = new Uri(cloudOptions.LocalDotNet.KmsUrl);
+    c.Timeout = localDotNetTimeout;
+});
+
+builder.Services.AddHttpClient(LocalDotNetClients.Iam, c =>
 {
-    builder.Services.AddSingleton<ISecretsProvider, AwsSecretsManagerProvider>();
-    builder.Services.AddSingleton<ICryptoProvider, AwsKmsCryptoProvider>();
-    builder.Services.AddSingleton<IAccessControlProvider, AwsAccessControlProvider>();
-    builder.Services.AddSingleton<IIdentityProvider, AwsIdentityProvider>();
+    c.BaseAddress = new Uri(cloudOptions.LocalDotNet.IamUrl);
+    c.Timeout = localDotNetTimeout;
+});
+
+builder.Services.AddHttpClient(LocalDotNetClients.S3, c =>
+{
+    c.BaseAddress = new Uri(cloudOptions.LocalDotNet.S3Url);
+    c.Timeout = localDotNetTimeout;
+});
+
+builder.Services.AddSingleton<LocalDotNetPolicyCache>();
+builder.Services.AddSingleton<LocalDotNetHealthCheck>();
+
+switch (cloudOptions.Provider)
+{
+    case CloudProviderMode.LocalDotNet:
+        builder.Services.AddSingleton<IObjectStore, LocalDotNetObjectStore>();
+        builder.Services.AddSingleton<ICryptoProvider, LocalDotNetCryptoProvider>();
+        builder.Services.AddSingleton<ISecretsProvider, LocalDotNetSecretsProvider>();
+        builder.Services.AddSingleton<IAccessControlProvider, LocalDotNetAccessControlProvider>();
+        builder.Services.AddSingleton<IIdentityProvider, LocalDotNetIdentityProvider>();
+        break;
+
+    case CloudProviderMode.Simulator:
+        // The Python simulator has no S3 the gateway can use for telemetry; the audit
+        // trail falls back to the .NET simulator's S3Local, which is the dev store anyway.
+        builder.Services.AddSingleton<IObjectStore, LocalDotNetObjectStore>();
+        builder.Services.AddSingleton<ISecretsProvider, SimulatorSecretsProvider>();
+        builder.Services.AddSingleton<ICryptoProvider, SimulatorCryptoProvider>();
+        builder.Services.AddSingleton<IAccessControlProvider, SimulatorAccessControlProvider>();
+        builder.Services.AddSingleton<IIdentityProvider, SimulatorIdentityProvider>();
+        break;
+
+    default:
+        builder.Services.AddSingleton<IObjectStore, AwsS3ObjectStore>();
+        builder.Services.AddSingleton<ISecretsProvider, AwsSecretsManagerProvider>();
+        builder.Services.AddSingleton<ICryptoProvider, AwsKmsCryptoProvider>();
+        builder.Services.AddSingleton<IAccessControlProvider, AwsAccessControlProvider>();
+        builder.Services.AddSingleton<IIdentityProvider, AwsIdentityProvider>();
+        break;
 }
 
 builder.Services.AddSingleton<ISigningKeyProvider, SigningKeyProvider>();
@@ -146,11 +189,14 @@ builder.Services.AddSingleton<IGuardrailService, GuardrailService>();
 builder.Services.AddSingleton<ISTSService, STSService>();
 builder.Services.AddSingleton<IBedrockService, BedrockService>();
 builder.Services.AddSingleton<ILocalModelService, LocalModelService>();
+builder.Services.AddSingleton<IAuditStore, S3AuditStore>();
 builder.Services.AddSingleton<IApplicationRegistryService, ApplicationRegistryService>();
 builder.Services.AddSingleton<IModelRouter, ModelRouter>();
+builder.Services.AddSingleton<IBillingService, BillingService>();
 
 builder.Services.AddHostedService<AwsCredentialBackgroundService>();
 builder.Services.AddHostedService<CloudBootstrapService>();
+builder.Services.AddHostedService<AuditFlushService>();
 
 // ---------------------------------------------------------------------------
 // 5. Authentication and authorization for the management plane

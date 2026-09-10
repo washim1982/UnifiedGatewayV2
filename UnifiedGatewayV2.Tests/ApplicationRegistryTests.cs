@@ -2,6 +2,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
+using UnifiedGateway.Services.Telemetry;
+using UnifiedGateway.Services.Cloud;
 using Xunit;
 
 namespace UnifiedGatewayV2.Tests;
@@ -12,6 +14,13 @@ public class ApplicationRegistryTests
     private readonly ISecurityService _securityService;
     private readonly GatewayOptions _options;
     private readonly StubAdminCredentialService _adminCredentials;
+
+    // One store shared by both registry instances: a restart keeps the same bucket.
+    private readonly InMemoryObjectStore _objectStore = new();
+    private readonly CloudOptions _cloudOptions = new()
+    {
+        Storage = new AuditStorageOptions { Bucket = "test-telemetry", FlushBatchSize = 1 }
+    };
 
     public ApplicationRegistryTests()
     {
@@ -37,6 +46,8 @@ public class ApplicationRegistryTests
             _securityService,
             _adminCredentials,
             Options.Create(_options),
+            Options.Create(new BillingOptions()),
+            new S3AuditStore(_objectStore, Options.Create(_cloudOptions), NullLogger<S3AuditStore>.Instance),
             NullLogger<ApplicationRegistryService>.Instance);
     }
 
@@ -240,7 +251,14 @@ public class ApplicationRegistryTests
             _securityService,
             _adminCredentials,
             Options.Create(_options),
+            Options.Create(new BillingOptions()),
+            new S3AuditStore(_objectStore, Options.Create(_cloudOptions), NullLogger<S3AuditStore>.Instance),
             NullLogger<ApplicationRegistryService>.Instance);
+
+        // Startup order in production: object storage is confirmed reachable, then the
+        // recent-metrics buffer is refilled from the trail. A constructor cannot await, so
+        // this is an explicit step rather than a side effect of construction.
+        await restarted.RehydrateRecentLogsAsync();
 
         var summary = await restarted.GetMetricsSummaryAsync();
 

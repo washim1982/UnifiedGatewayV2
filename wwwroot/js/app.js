@@ -246,6 +246,8 @@ document.addEventListener('DOMContentLoaded', () => {
       updatePageHeader(tab);
       if (tab === 'telemetry') {
         loadMetrics();
+      } else if (tab === 'billing') {
+        loadBilling();
       } else if (tab === 'guardrails') {
         loadGuardrailConfig();
       }
@@ -253,12 +255,18 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function updatePageHeader(tab) {
+    // The spend page carries its own header with its own range and export controls, so
+    // the shared topbar would repeat the title and offer a second Refresh button.
+    const topbar = document.querySelector(".topbar");
+    if (topbar) topbar.hidden = (tab === "billing");
+
     const titles = {
       apps: { title: 'Application Registry', sub: 'Manage per-application AI routing endpoints and system prompts' },
       guardrails: { title: 'Guardrails & Data Safety', sub: 'Admin-level PCI, PII, Secrets, and Prompt Injection policies for all requests' },
       generator: { title: 'API Generator & Test Console', sub: 'Generated REST endpoints with sample SDK code and interactive sandbox' },
       universal: { title: 'Universal Router', sub: 'Direct normalized schema invocation across Bedrock and Local engines' },
-      telemetry: { title: 'Telemetry & Observability', sub: 'Real-time throughput, token analytics, latency percentiles, and request logs' }
+      telemetry: { title: 'Telemetry & Observability', sub: 'Real-time throughput, token analytics, latency percentiles, and request logs' },
+      billing: { title: 'Billing & Cost', sub: 'Account spend and per-application token cost, daily, weekly and monthly' }
     };
     pageHeading.textContent = titles[tab]?.title || 'Dashboard';
     pageSubheading.textContent = titles[tab]?.sub || '';
@@ -993,7 +1001,9 @@ Write-Output $response.output`;
       temperature: parseFloat(document.getElementById('modal-app-temp').value),
       maxTokens: parseInt(document.getElementById('modal-app-tokens').value),
       fallbackProvider: document.getElementById('modal-app-fallback-provider').value || null,
-      fallbackModel: document.getElementById('modal-app-fallback-model').value || null
+      fallbackModel: document.getElementById('modal-app-fallback-model').value || null,
+      inputCostPerMillion: parseFloat(document.getElementById('modal-app-input-cost')?.value) || 0,
+      outputCostPerMillion: parseFloat(document.getElementById('modal-app-output-cost')?.value) || 0
     };
 
     try {
@@ -1139,6 +1149,564 @@ Write-Output $response.output`;
     if (!str) return '';
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
   }
+
+  // ==========================================================================
+  // Usage & Spend
+  // ==========================================================================
+
+  const RANGE_LABELS = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days' };
+
+  let billingRange = '7d';
+  let billingGrain = 'daily';
+  let billingCurrency = 'USD';
+  let billingData = null;
+  let appSort = { key: 'totalCost', dir: 'desc' };
+
+  function money(value, places) {
+    const n = Number(value) || 0;
+    // Sub-cent totals would all collapse to $0.00 and read as a broken page, so small
+    // amounts keep enough precision to show that something was in fact spent.
+    const decimals = places !== undefined ? places : (n > 0 && n < 0.01 ? 4 : 3);
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency', currency: billingCurrency,
+        minimumFractionDigits: decimals, maximumFractionDigits: decimals
+      }).format(n);
+    } catch (e) {
+      return '$' + n.toFixed(decimals);
+    }
+  }
+
+  function compact(value) {
+    const n = Number(value) || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(Math.round(n));
+  }
+
+  function setText(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function isCloud(app) {
+    return String(app.provider || '').toLowerCase() === 'bedrock' ||
+           String(app.provider || '').toLowerCase() === 'aws';
+  }
+
+  // --- Sparkline -------------------------------------------------------------
+  // Hand-drawn SVG rather than a charting library: one polyline and a fill is the
+  // whole requirement, and a dependency would outweigh it.
+
+  function drawSpark(svg, series, opts) {
+    const values = (series || []).map(v => Number(v) || 0);
+    const w = 100, h = 30, pad = 2;
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    svg.innerHTML = '';
+
+    if (values.length === 0) return;
+
+    const max = Math.max.apply(null, values);
+    const min = Math.min.apply(null, values);
+    const span = max - min;
+
+    // A flat series has no shape to show. Draw a dashed baseline instead of a
+    // misleading line pinned to the top or bottom of the box.
+    if (max <= 0 || span === 0) {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', pad); line.setAttribute('x2', w - pad);
+      line.setAttribute('y1', h / 2); line.setAttribute('y2', h / 2);
+      line.setAttribute('class', 'spark-flat');
+      svg.appendChild(line);
+      return;
+    }
+
+    const step = values.length > 1 ? (w - pad * 2) / (values.length - 1) : 0;
+    const y = v => h - pad - ((v - min) / span) * (h - pad * 2);
+    const pts = values.map((v, i) => [pad + i * step, y(v)]);
+
+    if (opts && opts.area) {
+      const area = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+      area.setAttribute('points',
+        `${pad},${h - pad} ` + pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ') +
+        ` ${w - pad},${h - pad}`);
+      area.setAttribute('class', 'spark-area');
+      svg.appendChild(area);
+    }
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    line.setAttribute('points', pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' '));
+    line.setAttribute('class', 'spark-line');
+    svg.appendChild(line);
+
+    const last = pts[pts.length - 1];
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('cx', last[0].toFixed(1));
+    dot.setAttribute('cy', last[1].toFixed(1));
+    dot.setAttribute('r', '1.9');
+    dot.setAttribute('class', 'spark-dot');
+    svg.appendChild(dot);
+  }
+
+  // --- Load ------------------------------------------------------------------
+
+  async function loadBilling() {
+    try {
+      const url = '/api/billing/summary?range=' + encodeURIComponent(billingRange) +
+                  '&grain=' + encodeURIComponent(billingGrain);
+      const res = await apiFetch(url);
+      if (!res.ok) return;
+
+      billingData = await res.json();
+      billingCurrency = billingData.currency || 'USD';
+
+      renderNotices(billingData);
+      renderHero(billingData);
+      renderSeries(billingData);
+      renderAnalytics(billingData);
+      renderModelFilter(billingData);
+      renderApps();
+
+      setText('spend-range-label', RANGE_LABELS[billingRange] || billingRange);
+      setText('spend-updated', new Date(billingData.generatedAt).toLocaleTimeString());
+    } catch (e) {
+      console.error('Failed to load spend', e);
+    }
+  }
+
+  // --- Notices ---------------------------------------------------------------
+
+  function notice(kind, text) {
+    const el = document.createElement('div');
+    el.className = 'bill-notice bill-notice-' + kind;
+    el.textContent = text;
+    return el;
+  }
+
+  function renderNotices(d) {
+    const box = document.getElementById('billing-notices');
+    if (!box) return;
+    box.innerHTML = '';
+
+    // Surface what makes a total untrustworthy. A confident figure resting on
+    // guessed rates is worse than an annotated one.
+    if (d.estimatedRequests > 0) {
+      box.appendChild(notice('warn',
+        d.estimatedRequests.toLocaleString() + ' request(s) were priced with the fallback rate ' +
+        'because no rate card applied. Those charges are estimates.'));
+    }
+    if ((d.applicationsMissingRates || []).length > 0) {
+      box.appendChild(notice('warn',
+        'No rate card set for: ' + d.applicationsMissingRates.join(', ') +
+        '. Set input and output cost per million tokens to bill these accurately.'));
+    }
+    if (d.unregisteredApplicationCount > 0) {
+      box.appendChild(notice('info',
+        d.unregisteredApplicationCount + ' application(s) billed in this window are no longer ' +
+        'registered. Their history is still charged.'));
+    }
+  }
+
+  // --- Hero ------------------------------------------------------------------
+
+  function renderHero(d) {
+    setText('spend-total', money(d.totalCost));
+
+    const delta = document.getElementById('spend-delta');
+    if (delta) {
+      const pct = d.changeVsPreviousPercent;
+      if (pct === null || pct === undefined) {
+        delta.textContent = 'no prior period to compare';
+        delta.className = 'delta';
+      } else {
+        const up = pct >= 0;
+        delta.textContent = (up ? '▲ ' : '▼ ') + Math.abs(pct).toFixed(1) + '% vs prior period';
+        delta.className = 'delta ' + (up ? 'delta-up' : 'delta-down');
+      }
+    }
+
+    // Log-ish placement against the $0 / $1 / $10 / $25+ ticks, so both a $0.04
+    // day and a $30 day land somewhere meaningful on the same track.
+    const marker = document.getElementById('spend-scale-marker');
+    if (marker) {
+      const v = Number(d.totalCost) || 0;
+      let pos;
+      if (v <= 0) pos = 0;
+      else if (v <= 1) pos = (v / 1) * 33.3;
+      else if (v <= 10) pos = 33.3 + (Math.log10(v) / 1) * 33.3;
+      else if (v <= 25) pos = 66.6 + ((v - 10) / 15) * 33.3;
+      else pos = 100;
+      marker.style.left = 'calc(' + Math.min(100, Math.max(0, pos)) + '% - 1.5px)';
+    }
+
+    const inputCost = (d.buckets || []).reduce((s, b) => s + (Number(b.inputCost) || 0), 0);
+    const outputCost = (d.buckets || []).reduce((s, b) => s + (Number(b.outputCost) || 0), 0);
+
+    setText('spend-input-cost', money(inputCost));
+    setText('spend-output-cost', money(outputCost));
+    setText('spend-input-tokens', compact(d.totalInputTokens) + ' tokens in');
+    setText('spend-output-tokens', compact(d.totalOutputTokens) + ' tokens out');
+
+    const eff = Number(d.tokenEfficiency) || 0;
+    setText('spend-efficiency', eff.toFixed(3) + '×');
+    const effMeter = document.getElementById('spend-efficiency-meter');
+    // 4x output-per-input is a generous ceiling for a full bar; beyond that it clamps.
+    if (effMeter) effMeter.style.width = Math.min(100, (eff / 4) * 100) + '%';
+
+    const apps = d.applications || [];
+    const top = apps.length > 0 ? apps[0] : null;
+    setText('spend-top-app', top ? top.name : 'None');
+    setText('spend-top-cost', money(top ? top.totalCost : 0, 2));
+    setText('spend-top-share', (top ? (Number(top.shareOfTotalPercent) || 0).toFixed(1) : '0') + '% of spend');
+
+    const spark = document.getElementById('spend-top-spark');
+    if (spark) drawSpark(spark, top ? top.trend : [], { area: true });
+  }
+
+  // --- Time series -----------------------------------------------------------
+
+  function shortLabel(period) {
+    if (billingGrain === 'monthly') return period;
+    if (billingGrain === 'weekly') return period.slice(5);
+    // Daily: a weekday name reads faster than a date when the window is a week.
+    const d = new Date(period + 'T00:00:00Z');
+    if (isNaN(d)) return period.slice(5);
+    return billingRange === '7d' || billingRange === '24h'
+      ? d.toLocaleDateString(undefined, { weekday: 'short' })
+      : period.slice(5);
+  }
+
+  function renderSeries(d) {
+    const host = document.getElementById('spend-series');
+    if (!host) return;
+
+    host.innerHTML = '';
+    const buckets = d.buckets || [];
+
+    if (buckets.length === 0) {
+      host.innerHTML = '<div class="spend-empty">No usage recorded in this window.</div>';
+      return;
+    }
+
+    const max = Math.max.apply(null, buckets.map(b => Number(b.totalCost) || 0));
+
+    buckets.forEach(b => {
+      const cost = Number(b.totalCost) || 0;
+      const col = document.createElement('div');
+      col.className = 'series-col' + (cost === 0 ? ' is-empty' : '');
+      col.title = b.period + '\n' + money(cost) + '\n' +
+                  Number(b.requests).toLocaleString() + ' requests\n' +
+                  compact(b.totalTokens) + ' tokens';
+
+      const plot = document.createElement('div');
+      plot.className = 'series-plot';
+
+      const bar = document.createElement('div');
+      bar.className = 'series-bar';
+      // Any non-zero spend gets a visible floor, so a small real charge does not
+      // render identically to a period with no usage at all.
+      bar.style.height = (cost > 0 ? Math.max((cost / max) * 100, 4) : 0) + '%';
+      plot.appendChild(bar);
+
+      const value = document.createElement('div');
+      value.className = 'series-value';
+      value.textContent = money(cost, cost > 0 && cost < 0.01 ? 3 : 2);
+
+      const label = document.createElement('div');
+      label.className = 'series-label';
+      label.textContent = shortLabel(b.period);
+
+      col.appendChild(plot);
+      col.appendChild(value);
+      col.appendChild(label);
+      host.appendChild(col);
+    });
+
+    // Open on the most recent period: the right edge is what anyone came to see.
+    const wrap = host.parentElement;
+    if (wrap) wrap.scrollLeft = wrap.scrollWidth;
+  }
+
+  // --- Analytics -------------------------------------------------------------
+
+  function bar(label, valueText, fraction, color) {
+    const li = document.createElement('li');
+    li.innerHTML =
+      '<span>' + escapeHtml(label) + '</span>' +
+      '<span class="bl-track"><span class="bl-fill" style="width:' +
+        Math.min(100, Math.max(0, fraction * 100)).toFixed(1) + '%;background:' + color + '"></span></span>' +
+      '<span class="bl-value">' + escapeHtml(valueText) + '</span>';
+    return li;
+  }
+
+  function facts(pairs) {
+    const dl = document.createDocumentFragment();
+    pairs.forEach(([k, v]) => {
+      const row = document.createElement('div');
+      row.innerHTML = '<dt>' + escapeHtml(k) + '</dt><dd>' + escapeHtml(v) + '</dd>';
+      dl.appendChild(row);
+    });
+    return dl;
+  }
+
+  function renderAnalytics(d) {
+    const inTok = Number(d.totalInputTokens) || 0;
+    const outTok = Number(d.totalOutputTokens) || 0;
+    const total = inTok + outTok;
+
+    const inCost = (d.buckets || []).reduce((s, b) => s + (Number(b.inputCost) || 0), 0);
+    const outCost = (d.buckets || []).reduce((s, b) => s + (Number(b.outputCost) || 0), 0);
+    const totalCost = Number(d.totalCost) || 0;
+    const requests = Number(d.totalRequests) || 0;
+    const apps = d.applications || [];
+
+    const tokenBars = document.getElementById('token-bars');
+    if (tokenBars) {
+      tokenBars.innerHTML = '';
+      tokenBars.appendChild(bar('Input tokens', compact(inTok), total ? inTok / total : 0, 'var(--input)'));
+      tokenBars.appendChild(bar('Output tokens', compact(outTok), total ? outTok / total : 0, 'var(--output)'));
+      tokenBars.appendChild(bar('Total tokens', compact(total), total ? 1 : 0,
+        'linear-gradient(90deg,var(--input),var(--output))'));
+    }
+
+    const tokenFacts = document.getElementById('token-facts');
+    if (tokenFacts) {
+      tokenFacts.innerHTML = '';
+      tokenFacts.appendChild(facts([
+        ['Token efficiency', (Number(d.tokenEfficiency) || 0).toFixed(3) + '×'],
+        ['Cost per 1K tokens', money(total ? (totalCost / total) * 1000 : 0, 4)],
+        ['Tokens per request', requests ? Math.round(total / requests).toLocaleString() : '0'],
+        ['Largest consumer', apps.length ? apps.slice().sort((a, b) =>
+          (b.totalTokens || 0) - (a.totalTokens || 0))[0].name : 'None']
+      ]));
+    }
+
+    const costBars = document.getElementById('cost-bars');
+    if (costBars) {
+      costBars.innerHTML = '';
+      costBars.appendChild(bar('Input cost', money(inCost), totalCost ? inCost / totalCost : 0, 'var(--input)'));
+      costBars.appendChild(bar('Output cost', money(outCost), totalCost ? outCost / totalCost : 0, 'var(--output)'));
+      costBars.appendChild(bar('Total cost', money(totalCost), totalCost ? 1 : 0,
+        'linear-gradient(90deg,var(--input),var(--output))'));
+    }
+
+    const costFacts = document.getElementById('cost-facts');
+    if (costFacts) {
+      costFacts.innerHTML = '';
+      const billedApps = apps.length;
+      costFacts.innerHTML = '';
+      costFacts.appendChild(facts([
+        ['Cost per request', money(requests ? totalCost / requests : 0, 4)],
+        ['Cost per app', money(billedApps ? totalCost / billedApps : 0)],
+        ['Output share of cost', (totalCost ? (outCost / totalCost) * 100 : 0).toFixed(1) + '%'],
+        ['Bedrock cloud share', (totalCost ? ((Number(d.cloudCost) || 0) / totalCost) * 100 : 0).toFixed(1) + '%']
+      ]));
+    }
+  }
+
+  // --- Applications table ----------------------------------------------------
+
+  function renderModelFilter(d) {
+    const select = document.getElementById('apps-model');
+    if (!select) return;
+
+    const current = select.value;
+    select.innerHTML = '<option value="">All models</option>';
+    (d.models || []).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      select.appendChild(opt);
+    });
+    select.value = current;
+  }
+
+  function filteredApps() {
+    if (!billingData) return [];
+
+    const term = (document.getElementById('apps-search')?.value || '').trim().toLowerCase();
+    const model = document.getElementById('apps-model')?.value || '';
+    const host = document.getElementById('apps-host')?.value || '';
+    const minCost = parseFloat(document.getElementById('apps-min-cost')?.value);
+    const minEff = parseFloat(document.getElementById('apps-min-eff')?.value);
+
+    let rows = (billingData.applications || []).filter(a => {
+      if (term && !((a.name || '') + ' ' + (a.appId || '') + ' ' + (a.model || ''))
+            .toLowerCase().includes(term)) return false;
+      if (model && a.model !== model) return false;
+      if (host === 'cloud' && !isCloud(a)) return false;
+      if (host === 'local' && isCloud(a)) return false;
+      if (!isNaN(minCost) && (Number(a.totalCost) || 0) < minCost) return false;
+      if (!isNaN(minEff) && (Number(a.tokenEfficiency) || 0) < minEff) return false;
+      return true;
+    });
+
+    const key = appSort.key, dir = appSort.dir === 'asc' ? 1 : -1;
+    rows.sort((a, b) => {
+      const x = a[key], y = b[key];
+      if (typeof x === 'string' || typeof y === 'string') {
+        return String(x || '').localeCompare(String(y || '')) * dir;
+      }
+      return ((Number(x) || 0) - (Number(y) || 0)) * dir;
+    });
+
+    return rows;
+  }
+
+  function renderApps() {
+    const tbody = document.getElementById('apps-rows');
+    if (!tbody || !billingData) return;
+
+    const rows = filteredApps();
+    const totalApps = (billingData.applications || []).length;
+    setText('apps-count', rows.length + ' of ' + totalApps + ' app' + (totalApps === 1 ? '' : 's'));
+
+    tbody.innerHTML = '';
+
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="spend-empty">' +
+        (totalApps === 0 ? 'No application usage in this window.' : 'No apps match these filters.') +
+        '</td></tr>';
+      return;
+    }
+
+    rows.forEach(a => {
+      const cloud = isCloud(a);
+      const hasRate = (Number(a.inputCostPerMillion) || 0) > 0 || (Number(a.outputCostPerMillion) || 0) > 0;
+      const share = Math.min(100, Number(a.shareOfTotalPercent) || 0);
+
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><div class="cell-app"><strong>' + escapeHtml(a.name) +
+          (a.isRegistered ? '' : '<span class="tag tag-deleted">deleted</span>') +
+          (hasRate ? '' : '<span class="tag tag-norate">no rate</span>') +
+          '</strong><span class="host-tag"><span class="host-dot' + (cloud ? ' cloud' : '') + '"></span>' +
+          (cloud ? 'Cloud' : 'Local') + '</span></div></td>' +
+        '<td><div class="cell-model"><span class="model-name">' + escapeHtml(a.model) + '</span>' +
+          '<span class="rate-chip" title="Input ' + money(a.inputCostPerMillion, 2) +
+          ' / output ' + money(a.outputCostPerMillion, 2) + ' per 1M tokens">rates</span></div></td>' +
+        '<td class="num">' + compact(a.inputTokens) + '</td>' +
+        '<td class="num">' + compact(a.outputTokens) + '</td>' +
+        '<td class="num">' + compact(a.totalTokens) + '</td>' +
+        '<td class="num">' + money(a.totalCost) + '</td>' +
+        '<td><div class="share-cell"><span class="share-track"><span class="share-fill" style="width:' +
+          share + '%"></span></span><span class="share-pct">' + share.toFixed(1) + '%</span></div></td>' +
+        '<td><svg class="spark-cell" preserveAspectRatio="none"></svg></td>' +
+        '<td class="num"><button class="row-menu" type="button" aria-label="Details for ' +
+          escapeHtml(a.name) + '">&#8943;</button></td>';
+
+      drawSpark(tr.querySelector('.spark-cell'), a.trend, { area: false });
+
+      tr.querySelector('.row-menu').addEventListener('click', () => {
+        const lines = [
+          a.name + '  (' + a.appId + ')',
+          'Model: ' + a.model + '  ·  ' + (cloud ? 'Cloud' : 'Local'),
+          'Rates: ' + money(a.inputCostPerMillion, 2) + ' in / ' + money(a.outputCostPerMillion, 2) + ' out per 1M',
+          'Requests: ' + Number(a.requests).toLocaleString(),
+          'Tokens: ' + compact(a.inputTokens) + ' in / ' + compact(a.outputTokens) + ' out',
+          'Cost: ' + money(a.totalCost) + '  (' + share.toFixed(1) + '% of spend)',
+          'Cost per request: ' + money(a.averageCostPerRequest, 4),
+          'Token efficiency: ' + (Number(a.tokenEfficiency) || 0).toFixed(3) + '×',
+          'Cloud / local: ' + money(a.cloudCost) + ' / ' + money(a.localCost)
+        ];
+        alert(lines.join('\n'));
+      });
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  // --- Controls --------------------------------------------------------------
+
+  document.querySelectorAll('#pane-billing .seg-btn[data-range]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#pane-billing .seg-btn[data-range]')
+        .forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      billingRange = btn.dataset.range;
+      loadBilling();
+    });
+  });
+
+  document.querySelectorAll('#pane-billing .seg-btn[data-grain]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#pane-billing .seg-btn[data-grain]')
+        .forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      billingGrain = btn.dataset.grain;
+      loadBilling();
+    });
+  });
+
+  ['apps-search', 'apps-model', 'apps-host', 'apps-min-cost', 'apps-min-eff'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', renderApps);
+  });
+
+  const appsClear = document.getElementById('apps-clear');
+  if (appsClear) {
+    appsClear.addEventListener('click', () => {
+      ['apps-search', 'apps-model', 'apps-host', 'apps-min-cost', 'apps-min-eff'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      });
+      renderApps();
+    });
+  }
+
+  document.querySelectorAll('#pane-billing .spend-table th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      appSort = { key: key, dir: appSort.key === key && appSort.dir === 'desc' ? 'asc' : 'desc' };
+      document.querySelectorAll('#pane-billing .spend-table th[data-sort]')
+        .forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+      th.classList.add(appSort.dir === 'asc' ? 'sort-asc' : 'sort-desc');
+      renderApps();
+    });
+  });
+
+  const billingRefresh = document.getElementById('btn-billing-refresh');
+  if (billingRefresh) billingRefresh.addEventListener('click', loadBilling);
+
+  const copyEndpoint = document.getElementById('btn-copy-billing-endpoint');
+  if (copyEndpoint) {
+    copyEndpoint.addEventListener('click', async () => {
+      const url = window.location.origin + '/api/billing/summary?range=' + billingRange +
+                  '&grain=' + billingGrain;
+      try {
+        await navigator.clipboard.writeText(url);
+        const original = copyEndpoint.innerHTML;
+        copyEndpoint.textContent = 'Copied';
+        setTimeout(() => { copyEndpoint.innerHTML = original; }, 1400);
+      } catch (e) {
+        window.prompt('Billing API endpoint', url);
+      }
+    });
+  }
+
+  document.querySelectorAll('#pane-billing [data-export]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const format = btn.dataset.export;
+      // The endpoint is authenticated, so this is fetched with the session token and the
+      // resulting blob handed to the browser rather than opened as a plain link.
+      const res = await apiFetch('/api/billing/export?format=' + encodeURIComponent(format) +
+                                 '&range=' + encodeURIComponent(billingRange) +
+                                 '&grain=' + encodeURIComponent(billingGrain));
+      if (!res.ok) return;
+
+      const blob = await res.blob();
+      const ext = format === 'xlsx' ? 'xlsx' : format;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'gateway-billing-' + billingRange + '.' + ext;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  });
 
   // Initial load. Nothing is fetched until there is a session, so an unauthenticated
   // visitor sees the sign-in form rather than a wall of failed requests.

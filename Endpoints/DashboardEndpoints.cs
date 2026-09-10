@@ -24,6 +24,42 @@ public static class DashboardEndpoints
             Detail = detail
         };
 
+
+    /// <summary>
+    /// Maps the grain query parameter onto the enum, defaulting to daily. An unrecognised
+    /// value falls back rather than 400-ing: a mistyped grain should still render a page.
+    /// </summary>
+    private static BillingGrain ParseGrain(string? grain) =>
+        Enum.TryParse<BillingGrain>(grain, ignoreCase: true, out var parsed)
+            ? parsed
+            : BillingGrain.Daily;
+
+
+    /// <summary>
+    /// Maps the range shortcut the dashboard sends (24h / 7d / 30d) onto a window and the
+    /// grain that reads sensibly at that length -- hourly detail over a month is unreadable,
+    /// and monthly buckets over a day say nothing. An explicit from/to always wins.
+    /// </summary>
+    private static (DateTimeOffset? From, DateTimeOffset? To, BillingGrain Grain) ResolveRange(
+        string? range, DateTimeOffset? from, DateTimeOffset? to)
+    {
+        if (from.HasValue || to.HasValue)
+        {
+            return (from, to, BillingGrain.Daily);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+
+        return (range ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            "24h" or "1d" => (now.AddHours(-24), now, BillingGrain.Daily),
+            "7d" => (now.AddDays(-6), now, BillingGrain.Daily),
+            "30d" => (now.AddDays(-29), now, BillingGrain.Daily),
+            "90d" => (now.AddDays(-89), now, BillingGrain.Weekly),
+            "12m" or "1y" => (now.AddMonths(-11), now, BillingGrain.Monthly),
+            _ => (null, null, BillingGrain.Daily)
+        };
+    }
     public static void MapDashboardEndpoints(this IEndpointRouteBuilder app)
     {
         // Deny by default for the whole management plane.
@@ -262,6 +298,99 @@ public static class DashboardEndpoints
         })
         .WithName("GetCredentialStatus")
         .RequireIamAction("ReadCredentialStatus");
+
+        #endregion
+
+
+        #region Billing
+
+        // Billing is admin-only: it exposes account-wide spend across every tenant.
+        group.MapGet("/billing/summary", async (
+            [FromQuery] string? grain,
+            [FromQuery] string? range,
+            [FromQuery] DateTimeOffset? from,
+            [FromQuery] DateTimeOffset? to,
+            IBillingService billing,
+            CancellationToken ct) =>
+        {
+            var (windowFrom, windowTo, defaultGrain) = ResolveRange(range, from, to);
+            var resolvedGrain = grain is null ? defaultGrain : ParseGrain(grain);
+
+            var summary = await billing.GetSummaryAsync(resolvedGrain, windowFrom, windowTo, ct);
+            return Results.Ok(summary);
+        })
+        .WithName("GetBillingSummary")
+        .WithSummary("Account billing summary and per-application breakdown (grain: daily, weekly, monthly)")
+        .RequireIamAction("ReadBilling");
+
+        group.MapGet("/billing/applications/{appId}", async (
+            string appId,
+            [FromQuery] string? grain,
+            [FromQuery] DateTimeOffset? from,
+            [FromQuery] DateTimeOffset? to,
+            IBillingService billing,
+            CancellationToken ct) =>
+        {
+            var result = await billing.GetApplicationBillingAsync(appId, ParseGrain(grain), from, to, ct);
+            return result is not null
+                ? Results.Ok(result)
+                : Results.NotFound(new { error = "No billing history for that application." });
+        })
+        .WithName("GetApplicationBilling")
+        .WithSummary("Billing detail for one application, bucketed at the requested grain")
+        .RequireIamAction("ReadBilling");
+
+        group.MapGet("/billing/export", async (
+            [FromQuery] string? grain,
+            [FromQuery] string? range,
+            [FromQuery] string? format,
+            [FromQuery] DateTimeOffset? from,
+            [FromQuery] DateTimeOffset? to,
+            HttpContext ctx,
+            IBillingService billing,
+            IApplicationRegistryService registry,
+            CancellationToken ct) =>
+        {
+            var (windowFrom, windowTo, defaultGrain) = ResolveRange(range, from, to);
+            var resolvedGrain = grain is null ? defaultGrain : ParseGrain(grain);
+            var resolvedFormat = (format ?? "csv").Trim().ToLowerInvariant();
+
+            // Exporting the whole account's spend is privileged; record it either way.
+            await registry.RecordManagementActionAsync(
+                Audit(ctx, "ExportBilling", "account", success: true,
+                      $"grain={resolvedGrain}; format={resolvedFormat}"), ct);
+
+            var stamp = DateTime.UtcNow.ToString("yyyyMMdd");
+            var baseName = $"gateway-billing-{resolvedGrain.ToString().ToLowerInvariant()}-{stamp}";
+
+            switch (resolvedFormat)
+            {
+                case "json":
+                {
+                    var summary = await billing.GetSummaryAsync(resolvedGrain, windowFrom, windowTo, ct);
+                    return Results.Json(summary, contentType: "application/json",
+                        statusCode: StatusCodes.Status200OK);
+                }
+
+                case "xlsx":
+                case "excel":
+                {
+                    var workbook = await billing.ExportXlsxAsync(resolvedGrain, windowFrom, windowTo, ct);
+                    return Results.File(workbook,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        baseName + ".xlsx");
+                }
+
+                default:
+                {
+                    var csv = await billing.ExportCsvAsync(resolvedGrain, windowFrom, windowTo, ct);
+                    return Results.File(System.Text.Encoding.UTF8.GetBytes(csv), "text/csv", baseName + ".csv");
+                }
+            }
+        })
+        .WithName("ExportBilling")
+        .WithSummary("Download billing rows as CSV, JSON, or a real .xlsx workbook")
+        .RequireIamAction("ReadBilling");
 
         #endregion
 

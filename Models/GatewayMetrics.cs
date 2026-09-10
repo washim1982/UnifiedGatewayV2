@@ -77,6 +77,37 @@ public record RequestLogEntry
     /// <summary>Correlation id carried through the request.</summary>
     [JsonPropertyName("traceId")]
     public string? TraceId { get; init; }
+
+    // --- Billing -----------------------------------------------------------
+    // Cost is computed once, when the entry is written, and frozen here with the rates
+    // that applied at that moment. Re-pricing an application therefore changes future
+    // invoices only; it never rewrites a bill that has already been issued.
+
+    /// <summary>Charge for the input tokens of this request.</summary>
+    [JsonPropertyName("inputCost")]
+    public decimal InputCost { get; init; }
+
+    /// <summary>Charge for the output tokens of this request.</summary>
+    [JsonPropertyName("outputCost")]
+    public decimal OutputCost { get; init; }
+
+    [JsonPropertyName("totalCost")]
+    public decimal TotalCost => InputCost + OutputCost;
+
+    /// <summary>Input rate applied, per million tokens.</summary>
+    [JsonPropertyName("inputRatePerMillion")]
+    public decimal InputRatePerMillion { get; init; }
+
+    /// <summary>Output rate applied, per million tokens.</summary>
+    [JsonPropertyName("outputRatePerMillion")]
+    public decimal OutputRatePerMillion { get; init; }
+
+    /// <summary>
+    /// True when a fallback rate was used because the application had no rate card, or the
+    /// request carried no application at all.
+    /// </summary>
+    [JsonPropertyName("isEstimatedCost")]
+    public bool IsEstimatedCost { get; init; }
 }
 
 /// <summary>

@@ -62,9 +62,22 @@ public class LocalModelService : ILocalModelService
         catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             stopwatch.Stop();
-            _logger.LogError(ex, "Local model invocation timed out for model {Model}", model);
+
+            // Name the numbers that actually caused this. A local model generates at a
+            // roughly fixed rate, so the usual cause is a max-tokens budget the configured
+            // timeout cannot cover -- not an overloaded engine. Telling the operator which
+            // knob to turn is the difference between a dead end and a one-line fix.
+            var timeoutSeconds = ResolveTimeoutSeconds(lowerModel);
+            var requestedTokens = request.MaxTokens > 0 ? request.MaxTokens : 2048;
+
+            _logger.LogError(ex,
+                "Local model {Model} timed out after {Timeout}s with MaxTokens={MaxTokens}.",
+                model, timeoutSeconds, requestedTokens);
+
             return CreateErrorResponse(request, model, stopwatch.ElapsedMilliseconds, "LOCAL_ENDPOINT_TIMEOUT",
-                "Local model execution timed out. The local engine may be overloaded or initializing.");
+                $"Local model '{model}' did not finish within the configured {timeoutSeconds}s timeout " +
+                $"while generating up to {requestedTokens} tokens. Either raise the provider timeout " +
+                $"(Gateway:LocalProviders:*:TimeoutSeconds), lower the application's MaxTokens, or use a smaller model.");
         }
         catch (Exception ex)
         {
@@ -74,6 +87,20 @@ public class LocalModelService : ILocalModelService
         }
     }
 
+    /// <summary>
+    /// The configured timeout for whichever local engine this model routes to, so an error
+    /// can quote the limit that actually fired rather than a generic one.
+    /// </summary>
+    private int ResolveTimeoutSeconds(string lowerModel)
+    {
+        if (lowerModel.StartsWith("lmstudio/") || lowerModel.StartsWith("openai/"))
+            return _options.LocalProviders.LmStudio.TimeoutSeconds;
+
+        if (lowerModel.StartsWith("llamacpp/") || lowerModel.StartsWith("llama.cpp/"))
+            return _options.LocalProviders.LlamaCpp.TimeoutSeconds;
+
+        return _options.LocalProviders.Ollama.TimeoutSeconds;
+    }
     private async Task<UniversalResponse> InvokeOllamaAsync(
         UniversalRequest request,
         Stopwatch stopwatch,

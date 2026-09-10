@@ -521,8 +521,21 @@ label {
 /* Generator & Tester Layout */
 .generator-layout, .universal-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0, ...) rather than a bare 1fr. A bare 1fr is minmax(auto, 1fr), and "auto"
+     resolves to min-content -- which for the config column is the width of an unbreakable
+     STS token inside the sample curl command. That blows the left track out to ~880px and
+     squeezes the invocation console off the right edge. Flooring both tracks at 0 lets the
+     code block use its own overflow-x, and keeps the console on screen. */
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.62fr);
   gap: 24px;
+  align-items: start;
+}
+
+/* Grid items default to min-width:auto, which re-introduces the same blow-out one level
+   down. Both panels must be allowed to shrink to their track. */
+.generator-layout > *,
+.universal-layout > * {
+  min-width: 0;
 }
 
 .app-info-panel {
@@ -810,9 +823,528 @@ label {
 }
 
 /* Responsive */
+/* Below this the two-column split leaves the console too narrow to type into, so the
+   panels stack and section 3 sits under sections 1 and 2 rather than overflowing. */
+@media (max-width: 1180px) {
+  .generator-layout, .universal-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
 @media (max-width: 900px) {
-  .generator-layout, .universal-layout { grid-template-columns: 1fr; }
+  .generator-layout, .universal-layout { grid-template-columns: minmax(0, 1fr); }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
   .sidebar { width: 220px; }
   .main-content { padding: 24px 20px; }
 }
+
+/* ============================================================
+   Usage & Spend
+   ------------------------------------------------------------
+   Money is the subject, so the figures are set in the mono face
+   with tabular figures: columns of currency have to line up, and
+   a digit must not shift width as the value updates.
+   ============================================================ */
+
+#pane-billing {
+  --spend: #34d399;   /* money in / total    */
+  --input: #4dd0e1;   /* input-side numbers  */
+  --output: #b48ef5;  /* output-side numbers */
+  --rule: rgba(255, 255, 255, .07);
+}
+
+/* --- Header -------------------------------------------------- */
+
+.spend-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 22px;
+}
+
+.spend-head-titles h2 {
+  margin: 0 0 4px;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+
+.spend-head-sub {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.spend-head-sub strong { color: var(--text-primary); font-weight: 600; }
+
+.spend-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* --- Segmented control --------------------------------------- */
+
+.seg {
+  display: inline-flex;
+  background: rgba(255, 255, 255, .04);
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.seg-btn {
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  padding: 6px 14px;
+  font: 500 12.5px/1 var(--font-sans, system-ui);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.seg-sm .seg-btn { padding: 5px 11px; font-size: 12px; }
+.seg-btn:hover { color: var(--text-primary); }
+.seg-btn.active { background: rgba(255, 255, 255, .1); color: var(--text-primary); }
+.seg-btn:focus-visible { outline: 2px solid var(--input); outline-offset: -2px; }
+
+/* --- Panels --------------------------------------------------- */
+
+.panel {
+  background: var(--bg-card);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-flush { padding: 0; gap: 0; overflow: hidden; }
+.panel-hero { gap: 14px; }
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.panel-label {
+  font: 600 10.5px/1 var(--font-mono, monospace);
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.panel-title { margin: 0; font-size: 14.5px; font-weight: 600; }
+.panel-note { font-size: 12px; color: var(--text-muted); }
+
+.panel-copy {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  max-width: 46ch;
+}
+
+/* --- Figures -------------------------------------------------- */
+
+.stat-xl, .stat-lg, .stat-md {
+  font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em;
+  line-height: 1;
+  overflow-wrap: anywhere;
+}
+
+.stat-xl { font-size: clamp(30px, 4.4vw, 44px); font-weight: 600; }
+.stat-lg { font-size: 25px; font-weight: 600; }
+.stat-md { font-size: 17px; font-weight: 600; font-family: var(--font-sans, system-ui); letter-spacing: 0; }
+
+.accent-spend { color: var(--spend); }
+.accent-input { color: var(--input); }
+.accent-output { color: var(--output); }
+
+.hero-figure { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.hero-figure-tight { gap: 8px; }
+
+.delta {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.delta-up { color: #f0918d; }
+.delta-down { color: var(--spend); }
+
+/* --- Spend scale ---------------------------------------------- */
+
+.scale { display: flex; flex-direction: column; gap: 6px; }
+
+.scale-track {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #34d399 0%, #d8c15c 34%, #d9982f 62%, #d9534f 100%);
+}
+
+.scale-marker {
+  position: absolute;
+  top: -3px;
+  width: 3px;
+  height: 11px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, .55);
+  transition: left .35s ease;
+}
+
+.scale-ticks {
+  display: flex;
+  justify-content: space-between;
+  font: 10.5px/1 var(--font-mono, monospace);
+  color: var(--text-muted);
+}
+
+/* --- Meter ---------------------------------------------------- */
+
+.meter { height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .07); overflow: hidden; }
+.meter-fill { height: 100%; border-radius: 3px; background: var(--output); transition: width .35s ease; }
+
+/* --- Layout grids --------------------------------------------- */
+
+.spend-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.spend-hero-split { display: grid; grid-template-rows: 1fr 1fr; gap: 14px; min-width: 0; }
+
+.spend-second {
+  display: grid;
+  grid-template-columns: minmax(0, .85fr) minmax(0, 1.6fr);
+  gap: 14px;
+  margin-top: 14px;
+  align-items: stretch;
+}
+
+.spend-analytics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1240px) {
+  .spend-hero { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .spend-second { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 860px) {
+  .spend-hero { grid-template-columns: minmax(0, 1fr); }
+  .spend-hero-split { grid-template-rows: none; grid-template-columns: 1fr 1fr; }
+}
+
+/* --- Section rules -------------------------------------------- */
+
+.section-rule {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 26px 0 14px;
+  padding-left: 10px;
+  border-left: 3px solid var(--output);
+}
+
+.section-rule h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.section-rule span { font-size: 12px; color: var(--text-muted); }
+
+/* --- Sparkline ------------------------------------------------ */
+
+.spark-wrap { margin-top: auto; padding-top: 8px; }
+.spark { width: 100%; height: 34px; display: block; overflow: visible; }
+.spark-line { fill: none; stroke: var(--spend); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.spark-area { fill: rgba(52, 211, 153, .13); stroke: none; }
+.spark-dot { fill: var(--spend); }
+.spark-flat { stroke: rgba(255, 255, 255, .14); stroke-width: 1.4; stroke-dasharray: 2 3; }
+
+.spark-cell { width: 108px; height: 26px; display: block; }
+
+/* --- Time series ---------------------------------------------- */
+
+.series-wrap { overflow-x: auto; margin-top: 4px; }
+
+.series {
+  /* Definite height: the bars size as a percentage of it. */
+  height: 168px;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  min-width: min-content;
+}
+
+.series-col {
+  flex: 1 0 34px;
+  min-width: 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.series-plot { flex: 1 1 auto; display: flex; align-items: flex-end; min-height: 0; }
+
+.series-bar {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(180deg, #3ddfa8, #24916f);
+  transition: height .3s ease;
+}
+
+.series-col.is-empty .series-bar { background: rgba(255, 255, 255, .06); }
+
+.series-value,
+.series-label {
+  flex: 0 0 auto;
+  text-align: center;
+  font: 10.5px/1.2 var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.series-value { color: var(--text-muted); padding-top: 6px; border-top: 1px solid var(--rule); }
+.series-label { color: var(--text-muted); opacity: .75; }
+
+/* --- Bar lists & fact lists ----------------------------------- */
+
+.barlist { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 11px; }
+
+.barlist li {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) minmax(0, 1fr) minmax(64px, auto);
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.barlist .bl-track { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, .06); overflow: hidden; }
+.barlist .bl-fill { height: 100%; border-radius: 3px; transition: width .35s ease; }
+
+.barlist .bl-value {
+  text-align: right;
+  font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.factlist {
+  margin: 16px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.factlist > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, .04);
+}
+
+.factlist > div:last-child { border-bottom: 0; }
+.factlist dt { font-size: 13px; color: var(--text-muted); }
+
+.factlist dd {
+  margin: 0;
+  font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: right;
+}
+
+/* --- Filter bar ----------------------------------------------- */
+
+.filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.filterbar-gap { flex: 1 1 auto; min-width: 0; }
+
+/* Export buttons travel as one group, so a wrap never strands "Excel" on its own row. */
+.export-group { display: inline-flex; gap: 8px; flex: 0 0 auto; }
+
+.search { position: relative; flex: 1 1 230px; min-width: 170px; display: flex; align-items: center; }
+.search svg { position: absolute; left: 11px; color: var(--text-muted); pointer-events: none; }
+
+.search input {
+  width: 100%;
+  padding: 8px 12px 8px 33px;
+  border-radius: 7px;
+  border: 1px solid var(--rule);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: 13px var(--font-sans, system-ui);
+}
+
+.filter-select { flex: 0 1 158px; min-width: 128px; padding: 8px 10px; font-size: 12.5px; }
+.filter-num { flex: 0 0 96px; padding: 8px 10px; font-size: 12.5px; }
+.search input:focus-visible,
+.filter-select:focus-visible,
+.filter-num:focus-visible { outline: 2px solid var(--input); outline-offset: -1px; }
+
+/* --- Applications table --------------------------------------- */
+
+.table-scroll { overflow-x: auto; }
+
+/* The table had no rules of its own and was falling back to user-agent defaults, which
+   centre header text and give rows no breathing room. */
+.spend-table {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.spend-table thead th {
+  text-align: left;
+  padding: 11px 14px;
+  font: 600 10.5px/1 var(--font-mono, monospace);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, .025);
+  border-bottom: 1px solid var(--rule);
+}
+
+.spend-table tbody td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .04);
+  color: var(--text-primary);
+}
+
+.spend-table tbody tr:last-child td { border-bottom: 0; }
+.spend-table tbody tr:hover td { background: rgba(255, 255, 255, .025); }
+
+.spend-table th.num, .spend-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.spend-table td.num { font-family: var(--font-mono, monospace); }
+
+.spend-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+.spend-table th[data-sort]:hover { color: var(--text-primary); }
+.spend-table th[data-sort]::after { content: ''; display: inline-block; width: 9px; }
+.spend-table th[data-sort].sort-asc::after { content: '\2191'; }
+.spend-table th[data-sort].sort-desc::after { content: '\2193'; }
+
+.spend-table td { vertical-align: middle; }
+.cell-app { display: flex; flex-direction: column; gap: 3px; }
+.cell-app strong { font-weight: 600; font-size: 13.5px; }
+
+.host-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: 500 11px/1 var(--font-sans, system-ui);
+  color: var(--text-muted);
+}
+
+.host-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--input); }
+.host-dot.cloud { background: var(--output); }
+
+.cell-model { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+.model-name {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.rate-chip {
+  font: 500 10px/1 var(--font-mono, monospace);
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--rule);
+  color: var(--text-muted);
+  cursor: help;
+  white-space: nowrap;
+}
+
+.share-cell { display: flex; align-items: center; gap: 9px; min-width: 128px; }
+.share-track { flex: 1 1 auto; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .07); overflow: hidden; }
+.share-fill { height: 100%; border-radius: 3px; background: var(--spend); }
+
+.share-pct {
+  font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 42px;
+  text-align: right;
+}
+
+.row-menu {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 17px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.row-menu:hover { color: var(--text-primary); background: rgba(255, 255, 255, .06); }
+
+.tag {
+  display: inline-block;
+  font: 600 9.5px/1 var(--font-mono, monospace);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.tag-deleted { background: rgba(217, 83, 79, .18); color: #f0a3a3; }
+.tag-norate { background: rgba(255, 255, 255, .08); color: var(--text-muted); }
+
+/* --- Notices & empty states ----------------------------------- */
+
+.bill-notice {
+  display: flex;
+  gap: 9px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+  border: 1px solid;
+}
+
+.bill-notice-warn { background: rgba(217, 152, 47, .1); border-color: rgba(217, 152, 47, .32); color: #e8c07d; }
+.bill-notice-info { background: rgba(79, 140, 184, .1); border-color: rgba(79, 140, 184, .3); color: #a9cbe4; }
+
+.spend-empty { text-align: center; color: var(--text-muted); padding: 30px 14px; font-size: 13.5px; }
+
+/* The topbar sets display:flex, which outranks the user-agent [hidden] rule, so make
+   the attribute win when the spend page supplies its own header. */
+.topbar[hidden] { display: none !important; }

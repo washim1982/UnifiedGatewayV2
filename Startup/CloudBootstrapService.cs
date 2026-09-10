@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services.Cloud;
+using UnifiedGateway.Services.Cloud.LocalDotNet;
 
 namespace UnifiedGateway.Startup;
 
@@ -14,6 +15,7 @@ public class CloudBootstrapService : IHostedService
     private readonly ISigningKeyProvider _signingKeys;
     private readonly IAdminCredentialService _adminCredentials;
     private readonly ICryptoProvider _crypto;
+    private readonly LocalDotNetHealthCheck _localDotNetHealth;
     private readonly CloudOptions _options;
     private readonly IHostEnvironment _environment;
     private readonly ILogger<CloudBootstrapService> _logger;
@@ -22,6 +24,7 @@ public class CloudBootstrapService : IHostedService
         ISigningKeyProvider signingKeys,
         IAdminCredentialService adminCredentials,
         ICryptoProvider crypto,
+        LocalDotNetHealthCheck localDotNetHealth,
         IOptions<CloudOptions> options,
         IHostEnvironment environment,
         ILogger<CloudBootstrapService> logger)
@@ -29,6 +32,7 @@ public class CloudBootstrapService : IHostedService
         _signingKeys = signingKeys;
         _adminCredentials = adminCredentials;
         _crypto = crypto;
+        _localDotNetHealth = localDotNetHealth;
         _options = options.Value;
         _environment = environment;
         _logger = logger;
@@ -38,6 +42,29 @@ public class CloudBootstrapService : IHostedService
     {
         _logger.LogInformation(
             "Cloud provider mode: {Provider}. Verifying key management availability.", _options.Provider);
+
+        // Before anything else, confirm the configured URLs are the services we think they
+        // are. Two local simulators share these ports with different service assignments, so
+        // a wrong-stack mix-up otherwise shows up much later as a decrypt failure.
+        if (_options.Provider == CloudProviderMode.LocalDotNet)
+        {
+            var endpoints = await _localDotNetHealth.ProbeAsync(cancellationToken);
+
+            foreach (var endpoint in endpoints.Where(e => !e.IsCorrectService))
+            {
+                _logger.LogError(
+                    "{Expected} is not answering at {Url}: {Problem}. The .NET simulator and the " +
+                    "Docker simulator both use ports 5001-5003 with different services on each; " +
+                    "stop one before starting the other, or give them distinct ports.",
+                    endpoint.Expected, endpoint.Url, endpoint.Problem);
+            }
+
+            if (endpoints.All(e => e.IsCorrectService))
+            {
+                _logger.LogInformation(
+                    "Local .NET AWS simulator verified: S3Local, KmsLocal and IamLocal all responding as expected.");
+            }
+        }
 
         var available = await _crypto.IsAvailableAsync(cancellationToken);
         if (!available)

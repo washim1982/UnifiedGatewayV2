@@ -55,6 +55,19 @@ public record AppConfig
     [JsonPropertyName("updatedAt")]
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 
+
+    /// <summary>
+    /// Cost per one million INPUT tokens, in the billing currency. Entered when the
+    /// application is registered. Zero means the gateway falls back to the configured
+    /// default rate and marks the resulting charge as estimated.
+    /// </summary>
+    [JsonPropertyName("inputCostPerMillion")]
+    public decimal InputCostPerMillion { get; init; }
+
+    /// <summary>Cost per one million OUTPUT tokens, in the billing currency.</summary>
+    [JsonPropertyName("outputCostPerMillion")]
+    public decimal OutputCostPerMillion { get; init; }
+
     [JsonPropertyName("versionHistory")]
     public List<AppConfigSnapshot> VersionHistory { get; init; } = [];
 }
@@ -78,6 +91,12 @@ public record AppConfigSnapshot
 
     [JsonPropertyName("maxTokens")]
     public int MaxTokens { get; init; }
+
+    [JsonPropertyName("inputCostPerMillion")]
+    public decimal InputCostPerMillion { get; init; }
+
+    [JsonPropertyName("outputCostPerMillion")]
+    public decimal OutputCostPerMillion { get; init; }
 
     [JsonPropertyName("savedAt")]
     public DateTimeOffset SavedAt { get; init; }
@@ -114,6 +133,14 @@ public record CreateAppRequest
 
     [JsonPropertyName("fallbackModel")]
     public string? FallbackModel { get; init; }
+
+    /// <summary>Cost per one million input tokens. Supplied by the operator at registration.</summary>
+    [JsonPropertyName("inputCostPerMillion")]
+    public decimal InputCostPerMillion { get; init; }
+
+    /// <summary>Cost per one million output tokens. Supplied by the operator at registration.</summary>
+    [JsonPropertyName("outputCostPerMillion")]
+    public decimal OutputCostPerMillion { get; init; }
 }
 
 public record CreateAppResponse
@@ -168,4 +195,10 @@ public record UpdateAppRequest
 
     [JsonPropertyName("isActive")]
     public bool? IsActive { get; init; }
+
+    [JsonPropertyName("inputCostPerMillion")]
+    public decimal? InputCostPerMillion { get; init; }
+
+    [JsonPropertyName("outputCostPerMillion")]
+    public decimal? OutputCostPerMillion { get; init; }
 }

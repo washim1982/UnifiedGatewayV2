@@ -82,6 +82,10 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           Telemetry & Metrics
         </button>
+        <button class="nav-btn" data-tab="billing" data-requires-admin>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          Billing & Cost
+        </button>
       </nav>
 
       <div class="sidebar-footer">
@@ -456,6 +460,179 @@
           </div>
         </div>
       </section>
+
+      <!-- TAB 6: Usage & Spend -->
+      <section class="tab-pane" id="pane-billing">
+
+        <header class="spend-head">
+          <div class="spend-head-titles">
+            <h2>Usage &amp; Spend</h2>
+            <p class="spend-head-sub">
+              Unified LLM Gateway &middot; <strong id="spend-range-label">Last 7 days</strong>
+              &middot; Updated <span id="spend-updated">&mdash;</span>
+            </p>
+          </div>
+
+          <div class="spend-head-actions">
+            <div class="seg" role="group" aria-label="Reporting range">
+              <button class="seg-btn" data-range="24h">24h</button>
+              <button class="seg-btn active" data-range="7d">7d</button>
+              <button class="seg-btn" data-range="30d">30d</button>
+            </div>
+            <button class="btn btn-outline btn-sm" id="btn-copy-billing-endpoint">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy API endpoint
+            </button>
+            <button class="btn btn-outline btn-sm" id="btn-billing-refresh">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6"/><path d="M22 11.5A10 10 0 0 0 3.2 7.2M2 12.5a10 10 0 0 0 18.8 4.3"/></svg>
+              Refresh
+            </button>
+          </div>
+        </header>
+
+        <div id="billing-notices"></div>
+
+        <!-- Headline ------------------------------------------------------ -->
+        <div class="spend-hero">
+
+          <div class="panel panel-hero">
+            <span class="panel-label">Organization spend</span>
+            <div class="hero-figure">
+              <span class="stat-xl accent-spend" id="spend-total">$0.000</span>
+              <span class="delta" id="spend-delta"></span>
+            </div>
+            <div class="scale">
+              <div class="scale-track"><div class="scale-marker" id="spend-scale-marker"></div></div>
+              <div class="scale-ticks"><span>$0</span><span>$1</span><span>$10</span><span>$25+</span></div>
+            </div>
+          </div>
+
+          <div class="spend-hero-split">
+            <div class="panel">
+              <span class="panel-label">Input cost</span>
+              <span class="stat-lg accent-input" id="spend-input-cost">$0.000</span>
+              <span class="panel-note" id="spend-input-tokens">0 tokens in</span>
+            </div>
+            <div class="panel">
+              <span class="panel-label">Output cost</span>
+              <span class="stat-lg accent-output" id="spend-output-cost">$0.000</span>
+              <span class="panel-note" id="spend-output-tokens">0 tokens out</span>
+            </div>
+          </div>
+
+          <div class="panel">
+            <span class="panel-label">Top spending app</span>
+            <span class="stat-md" id="spend-top-app">None</span>
+            <div class="hero-figure hero-figure-tight">
+              <span class="stat-lg accent-spend" id="spend-top-cost">$0.00</span>
+              <span class="panel-note" id="spend-top-share">0% of spend</span>
+            </div>
+            <div class="spark-wrap"><svg class="spark" id="spend-top-spark" preserveAspectRatio="none"></svg></div>
+          </div>
+
+        </div>
+
+        <!-- Efficiency + time series -------------------------------------- -->
+        <div class="spend-second">
+
+          <div class="panel">
+            <span class="panel-label">Token efficiency</span>
+            <span class="stat-xl accent-output" id="spend-efficiency">0.000&times;</span>
+            <div class="meter"><div class="meter-fill" id="spend-efficiency-meter"></div></div>
+            <p class="panel-copy">
+              Output tokens generated per input token.
+              Embedding and retrieval workloads pull this down; chat and agent loops push it up.
+            </p>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h3 class="panel-title">Spend over time</h3>
+              <div class="seg seg-sm" role="group" aria-label="Bucket grain">
+                <button class="seg-btn active" data-grain="daily">Daily</button>
+                <button class="seg-btn" data-grain="weekly">Weekly</button>
+                <button class="seg-btn" data-grain="monthly">Monthly</button>
+              </div>
+            </div>
+            <div class="series-wrap"><div class="series" id="spend-series"></div></div>
+          </div>
+
+        </div>
+
+        <!-- Analytics ------------------------------------------------------ -->
+        <div class="section-rule">
+          <h3>Token &amp; cost analytics</h3>
+          <span>across all active apps</span>
+        </div>
+
+        <div class="spend-analytics">
+
+          <div class="panel">
+            <h4 class="panel-title">Token breakdown</h4>
+            <ul class="barlist" id="token-bars"></ul>
+            <dl class="factlist" id="token-facts"></dl>
+          </div>
+
+          <div class="panel">
+            <h4 class="panel-title">Cost breakdown</h4>
+            <ul class="barlist" id="cost-bars"></ul>
+            <dl class="factlist" id="cost-facts"></dl>
+          </div>
+
+        </div>
+
+        <!-- Applications ---------------------------------------------------- -->
+        <div class="section-rule">
+          <h3>Applications</h3>
+          <span id="apps-count">0 of 0 apps</span>
+        </div>
+
+        <div class="panel panel-flush">
+          <div class="filterbar">
+            <div class="search">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <input type="search" id="apps-search" placeholder="Search apps and models" aria-label="Search apps and models">
+            </div>
+            <select id="apps-model" class="form-control filter-select" aria-label="Filter by model">
+              <option value="">All models</option>
+            </select>
+            <select id="apps-host" class="form-control filter-select" aria-label="Filter by hosting">
+              <option value="">Local and cloud</option>
+              <option value="cloud">Cloud only</option>
+              <option value="local">Local only</option>
+            </select>
+            <input type="number" id="apps-min-cost" class="form-control filter-num" placeholder="Min $" min="0" step="0.01" aria-label="Minimum spend">
+            <input type="number" id="apps-min-eff" class="form-control filter-num" placeholder="Min eff &times;" min="0" step="0.1" aria-label="Minimum token efficiency">
+            <button class="btn btn-outline btn-sm" id="apps-clear">Clear</button>
+            <span class="filterbar-gap"></span>
+            <span class="export-group">
+              <button class="btn btn-outline btn-sm" data-export="csv">CSV</button>
+              <button class="btn btn-outline btn-sm" data-export="json">JSON</button>
+              <button class="btn btn-outline btn-sm" data-export="xlsx">Excel</button>
+            </span>
+          </div>
+
+          <div class="table-scroll">
+            <table class="data-table spend-table">
+              <thead>
+                <tr>
+                  <th data-sort="name">App</th>
+                  <th data-sort="model">Model</th>
+                  <th class="num" data-sort="inputTokens">Input</th>
+                  <th class="num" data-sort="outputTokens">Output</th>
+                  <th class="num" data-sort="totalTokens">Total</th>
+                  <th class="num" data-sort="totalCost">Cost</th>
+                  <th data-sort="shareOfTotalPercent">Spend share</th>
+                  <th>Trend</th>
+                  <th class="num" aria-label="Actions"></th>
+                </tr>
+              </thead>
+              <tbody id="apps-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </section>
     </main>
   </div>
 
@@ -525,6 +702,24 @@
             <div class="form-group">
               <label>Fallback Model</label>
               <input type="text" id="modal-app-fallback-model" class="form-control" placeholder="e.g. ollama/llama3 or claude-3-haiku">
+            </div>
+          </div>
+
+          <div class="form-section-label" style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08);font:600 11px/1 var(--font-mono,monospace);letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);">
+            Billing rate card
+          </div>
+          <p style="margin:8px 0 12px;font-size:12.5px;color:var(--text-muted);">
+            Cost per one million tokens. Every request is priced at the rate in force when it runs, so changing these later affects future invoices only.
+          </p>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>Input cost / 1M tokens</label>
+              <input type="number" id="modal-app-input-cost" class="form-control" value="0" step="0.01" min="0" placeholder="e.g. 3.00">
+            </div>
+            <div class="form-group">
+              <label>Output cost / 1M tokens</label>
+              <input type="number" id="modal-app-output-cost" class="form-control" value="0" step="0.01" min="0" placeholder="e.g. 15.00">
             </div>
           </div>
         </div>

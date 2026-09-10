@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
 using UnifiedGateway.Services.Cloud;
+using UnifiedGateway.Services.Telemetry;
 
 namespace UnifiedGatewayV2.Tests;
 
@@ -95,6 +96,59 @@ public sealed class StubAdminCredentialService : IAdminCredentialService
         => Task.FromResult<string?>(null);
 }
 
+
+/// <summary>
+/// In-memory <see cref="IObjectStore"/>. Tests run the real <see cref="S3AuditStore"/> over
+/// this, so batching, date partitioning and read-back are exercised for real rather than
+/// stubbed out — only the network is replaced.
+/// </summary>
+public sealed class InMemoryObjectStore : IObjectStore
+{
+    private readonly ConcurrentDictionary<string, byte[]> _objects = new(StringComparer.Ordinal);
+
+    public int ObjectCount => _objects.Count;
+    public IReadOnlyCollection<string> Keys => _objects.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
+
+    public Task PutAsync(string key, byte[] content, string contentType, CancellationToken cancellationToken = default)
+    {
+        _objects[key] = content;
+        return Task.CompletedTask;
+    }
+
+    public Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
+        => Task.FromResult(_objects.TryGetValue(key, out var body) ? body : null);
+
+    public Task<IReadOnlyList<string>> ListAsync(string prefix, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<string>>(
+            _objects.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal))
+                         .OrderBy(k => k, StringComparer.Ordinal).ToList());
+
+    public Task DeleteAsync(string key, CancellationToken cancellationToken = default)
+    {
+        _objects.TryRemove(key, out _);
+        return Task.CompletedTask;
+    }
+
+    public Task EnsureReadyAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default) => Task.FromResult(true);
+}
+
+/// <summary>An object store whose writes always fail, for testing buffer-retry behaviour.</summary>
+public sealed class FailingObjectStore : IObjectStore
+{
+    public Task PutAsync(string key, byte[] content, string contentType, CancellationToken cancellationToken = default)
+        => throw new IOException("object store unavailable");
+
+    public Task<byte[]?> GetAsync(string key, CancellationToken cancellationToken = default)
+        => Task.FromResult<byte[]?>(null);
+
+    public Task<IReadOnlyList<string>> ListAsync(string prefix, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<string>>([]);
+
+    public Task DeleteAsync(string key, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public Task EnsureReadyAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+}
 /// <summary>Builds a fully wired SecurityService over the in-memory seams.</summary>
 public static class TestFactory
 {

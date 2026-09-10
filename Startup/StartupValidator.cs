@@ -106,6 +106,16 @@ public static class StartupValidator
                 "The local AWS simulator is for Development and Test only.");
         }
 
+        // The .NET simulator holds keys in a dev key file and auto-creates any role that is
+        // asked for, so a principal is never actually refused. That is fine for a developer
+        // loop and unacceptable anywhere else.
+        if (cloud.Provider == CloudProviderMode.LocalDotNet && !isDevelopment)
+        {
+            failures.Add(
+                $"Gateway:Cloud:Provider is 'LocalDotNet' in the '{environment.EnvironmentName}' environment. " +
+                "The .NET local AWS simulator is for Development only; use 'Aws' elsewhere.");
+        }
+
         if (cloud.Provider == CloudProviderMode.Aws && !string.IsNullOrWhiteSpace(cloud.BedrockServiceUrl))
         {
             failures.Add(
