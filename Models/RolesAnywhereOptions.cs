@@ -75,20 +75,16 @@ public class RolesAnywhereOptions
 
     /// <summary>
     /// Overrides the CreateSession endpoint. Empty means the real regional endpoint,
-    /// <c>https://rolesanywhere.{region}.amazonaws.com</c>. Only a local simulator has any
-    /// business setting this, and StartupValidator refuses it outside Development.
+    /// <c>https://rolesanywhere.{region}.amazonaws.com</c>.
+    ///
+    /// This is the ONLY difference between Development and Production. The local .NET
+    /// simulator implements the same AWS4-X509 contract on POST /sessions, so the request
+    /// built here, the signature over it and the response parsed back are identical in
+    /// both -- which is what makes a passing dev run evidence about production rather than
+    /// about a second code path. StartupValidator refuses this outside Development.
     /// </summary>
     public string EndpointOverride { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Speaks the .NET simulator's simplified CreateSession contract instead of the AWS one.
-    ///
-    /// The simulator verifies a bare RSA signature over a client-chosen string; AWS verifies
-    /// a full SigV4 AWS4-X509 signature. Exercising this path therefore tells you the wiring
-    /// and the certificate load work -- it does NOT validate the production signing.
-    /// Development only.
-    /// </summary>
-    public bool UseSimulatorProtocol { get; set; } = false;
 }
 
 public class CertificateOptions

@@ -246,34 +246,27 @@ public static class StartupValidator
                 "environment. Clear it so credentials come from the real Roles Anywhere endpoint.");
         }
 
-        if (!isDevelopment && rolesAnywhere.UseSimulatorProtocol)
-        {
-            failures.Add(
-                $"Gateway:Aws:RolesAnywhere:UseSimulatorProtocol is true in the " +
-                $"'{environment.EnvironmentName}' environment. The simulator does not verify AWS4-X509 " +
-                "signatures; it is a Development wiring aid only.");
-        }
-
         ValidateCertificate(rolesAnywhere.Certificate, failures);
     }
 
     private static void ValidateCertificate(CertificateOptions certificate, List<string> failures)
     {
-        // The thumbprint is a placeholder in the shipped templates too, and it is easy to
-        // substitute the ARNs and forget it -- the certificate is installed by a different
-        // step, often by a different person.
-        if (certificate.Thumbprint.Contains('<') || certificate.Thumbprint.Contains('>'))
-        {
-            failures.Add(
-                "Gateway:Aws:RolesAnywhere:Certificate:Thumbprint still contains a placeholder " +
-                $"('{certificate.Thumbprint}'). Substitute the installed certificate's thumbprint.");
-        }
-
         switch (certificate.Source)
         {
             case CertificateSource.WindowsStore when string.IsNullOrWhiteSpace(certificate.Thumbprint):
                 failures.Add(
                     "Gateway:Aws:RolesAnywhere:Certificate:Thumbprint is required when Source is 'WindowsStore'.");
+                break;
+
+            // Checked only for the source that actually reads it. The base appsettings ships a
+            // placeholder thumbprint, and an environment selecting PemFile inherits it without
+            // ever using it -- failing on that would be refusing to start over a field the
+            // configuration does not consult.
+            case CertificateSource.WindowsStore when
+                certificate.Thumbprint.Contains('<') || certificate.Thumbprint.Contains('>'):
+                failures.Add(
+                    "Gateway:Aws:RolesAnywhere:Certificate:Thumbprint still contains a placeholder " +
+                    $"('{certificate.Thumbprint}'). Substitute the installed certificate's thumbprint.");
                 break;
 
             case CertificateSource.PemFile when

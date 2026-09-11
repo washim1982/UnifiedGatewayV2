@@ -248,6 +248,34 @@ public class RolesAnywhereTests
         Assert.NotEqual(first.Authorization, second.Authorization);
     }
 
+    [Fact]
+    public void ANonDefaultPortIsPartOfTheSignedHostHeader()
+    {
+        // HttpClient sends "Host: localhost:5003" for a non-default port, so signing only the
+        // hostname mismatches what is sent. Real AWS runs on 443, where the two agree, so this
+        // surfaces only against a local simulator -- as a 403 that reads like a bad credential.
+        using var certificate = CreateRsaCertificate();
+
+        var signed = RolesAnywhereSigner.Sign(certificate, [], "localhost:5003", Region, Body, FixedTime);
+
+        Assert.Contains("host:localhost:5003", signed.CanonicalRequest);
+    }
+
+    [Fact]
+    public async Task AnEndpointOverrideIsUsedVerbatimIncludingItsPort()
+    {
+        var (provider, handler) = CreateProvider(HttpStatusCode.OK, AwsSessionResponse,
+            settings => settings.EndpointOverride = "http://localhost:5003");
+        using var _p = provider;
+
+        await provider.CreateSessionAsync();
+
+        Assert.Equal("http://localhost:5003/sessions", handler.LastRequest!.RequestUri!.ToString());
+
+        // What HttpClient will actually put on the wire, and therefore what had to be signed.
+        Assert.Equal("localhost:5003", handler.LastRequest.RequestUri.Authority);
+    }
+
     // --- The session exchange ---------------------------------------------------------
 
     private sealed class StubHandler(HttpStatusCode status, string body) : HttpMessageHandler
@@ -374,17 +402,45 @@ public class RolesAnywhereTests
     }
 
     [Fact]
-    public async Task AForbiddenResponseNamesTheLikelyCause()
+    public async Task AForbiddenResponseNamesTheLikelyCauseWhenTheServiceWillNotSay()
     {
-        // 403 is what both a wrong trust anchor and a role trust policy that omits
-        // rolesanywhere.amazonaws.com return, so the message has to list the candidates.
-        var (provider, _) = CreateProvider(HttpStatusCode.Forbidden, """{"message":"denied"}""");
+        // Real AWS returns 403 with no explanation for a wrong trust anchor, a profile that
+        // does not list the role, and a trust policy missing sts:TagSession alike. With
+        // nothing to go on, the message has to list the candidates.
+        var (provider, _) = CreateProvider(HttpStatusCode.Forbidden, string.Empty);
         using var _p = provider;
 
         var ex = await Assert.ThrowsAsync<RolesAnywhereException>(() => provider.CreateSessionAsync());
 
         Assert.Contains("trust anchor", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("403", ex.Message);
+    }
+
+    [Fact]
+    public async Task AReportedReasonIsPreferredOverGuessing()
+    {
+        // The local simulator does say what was wrong. A definite answer should lead rather
+        // than sit behind two hundred characters of speculation.
+        var (provider, _) = CreateProvider(HttpStatusCode.Forbidden,
+            """{"message":"The role's trust policy omits sts:TagSession."}""");
+        using var _p = provider;
+
+        var ex = await Assert.ThrowsAsync<RolesAnywhereException>(() => provider.CreateSessionAsync());
+
+        Assert.Contains("omits sts:TagSession", ex.Message);
+        Assert.DoesNotContain("Check that the trust anchor holds", ex.Message);
+    }
+
+    [Fact]
+    public async Task ANonJsonErrorBodyFallsBackToGuessing()
+    {
+        // A proxy or load balancer in front of the endpoint returns HTML, not JSON.
+        var (provider, _) = CreateProvider(HttpStatusCode.Forbidden, "<html>403 Forbidden</html>");
+        using var _p = provider;
+
+        var ex = await Assert.ThrowsAsync<RolesAnywhereException>(() => provider.CreateSessionAsync());
+
+        Assert.Contains("trust anchor", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -532,19 +588,6 @@ public class RolesAnywhereTests
         var ex = Assert.Throws<InvalidOperationException>(() => Validate(gateway));
 
         Assert.Contains("900 to 3600", ex.Message);
-    }
-
-    [Fact]
-    public void TheSimulatorProtocolIsRefusedOutsideDevelopment()
-    {
-        // It does not verify AWS4-X509 signatures, so a production host using it would be
-        // authenticating against something that checks almost nothing.
-        var gateway = ValidGateway();
-        gateway.Aws.RolesAnywhere.UseSimulatorProtocol = true;
-
-        var ex = Assert.Throws<InvalidOperationException>(() => Validate(gateway));
-
-        Assert.Contains("UseSimulatorProtocol", ex.Message);
     }
 
     [Fact]

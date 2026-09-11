@@ -87,12 +87,10 @@ public sealed class RolesAnywhereCredentialProvider : IRolesAnywhereCredentialPr
     public async Task<(AWSCredentials Credentials, DateTimeOffset Expiration, string SubjectArn)>
         CreateSessionAsync(CancellationToken cancellationToken = default)
     {
-        var settings = _options.Aws.RolesAnywhere;
-        var loaded = _certificate.Value;
-
-        return settings.UseSimulatorProtocol
-            ? await CreateSimulatorSessionAsync(settings, loaded, cancellationToken)
-            : await CreateAwsSessionAsync(settings, loaded, cancellationToken);
+        // One protocol everywhere. The local simulator implements the same AWS4-X509
+        // CreateSession contract, so Development differs only by EndpointOverride.
+        return await CreateAwsSessionAsync(
+            _options.Aws.RolesAnywhere, _certificate.Value, cancellationToken);
     }
 
     // --- Real AWS -------------------------------------------------------------------
@@ -103,7 +101,12 @@ public sealed class RolesAnywhereCredentialProvider : IRolesAnywhereCredentialPr
         CancellationToken cancellationToken)
     {
         var endpoint = ResolveEndpoint(settings, _options.Aws.Region);
-        var host = endpoint.Host;
+
+        // Authority, not Host: it carries the port when the port is not the scheme default.
+        // Against real AWS over 443 the two are identical, but a simulator on
+        // http://localhost:5003 sends "Host: localhost:5003" while Host would sign
+        // "localhost" -- a signature mismatch that looks like a credential problem.
+        var host = endpoint.Authority;
 
         // AWS caps a Roles Anywhere session at one hour regardless of what the role's own
         // maximum allows, so clamping here turns a rejected request into a shorter session.
@@ -180,6 +183,15 @@ public sealed class RolesAnywhereCredentialProvider : IRolesAnywhereCredentialPr
         RolesAnywhereOptions settings,
         ClientCertificateLoader.LoadedCertificate loaded)
     {
+        // Real AWS returns a bare status with no explanation, which is why the guesses below
+        // exist. The local simulator does say what was wrong -- when anything does, lead with
+        // it rather than burying a definite answer behind a list of possibilities.
+        var reported = TryReadMessage(payload);
+        if (reported is not null)
+        {
+            return $"Roles Anywhere CreateSession failed with {(int)status}: {reported}";
+        }
+
         var likely = (int)status switch
         {
             403 =>
@@ -204,78 +216,51 @@ public sealed class RolesAnywhereCredentialProvider : IRolesAnywhereCredentialPr
                $"Response: {Truncate(payload, 500)}";
     }
 
-    // --- .NET simulator -------------------------------------------------------------
-
-    /// <summary>
-    /// The simulator's simplified contract: an RSA signature over a client-chosen string,
-    /// with no SigV4 canonicalisation. Exercising this confirms the wiring and the
-    /// certificate load; it does not confirm the production signing is correct.
-    /// </summary>
-    private async Task<(AWSCredentials, DateTimeOffset, string)> CreateSimulatorSessionAsync(
-        RolesAnywhereOptions settings,
-        ClientCertificateLoader.LoadedCertificate loaded,
-        CancellationToken cancellationToken)
-    {
-        var endpoint = ResolveEndpoint(settings, _options.Aws.Region);
-
-        var challenge = $"{settings.SessionName}:{DateTimeOffset.UtcNow:O}:{Guid.NewGuid():N}";
-
-        using var rsa = loaded.Leaf.GetRSAPrivateKey()
-            ?? throw new RolesAnywhereException(
-                "The simulator protocol requires an RSA certificate; this one has no RSA private key.");
-
-        var signature = Convert.ToBase64String(rsa.SignData(
-            Encoding.UTF8.GetBytes(challenge), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1));
-
-        var body = JsonSerializer.Serialize(new
-        {
-            CertPem = ToPem(loaded.Leaf),
-            SignatureBase64 = signature,
-            PayloadToVerify = challenge,
-            ProfileArn = settings.ProfileArn,
-            RoleArn = settings.RoleArn,
-            TrustAnchorArn = settings.TrustAnchorArn,
-            DurationSeconds = Math.Clamp(settings.DurationSeconds, 900, 43200)
-        });
-
-        using var http = _httpClientFactory.CreateClient(HttpClientName);
-        using var response = await http.PostAsync(
-            new Uri(endpoint, "/rolesanywhere/create-session"),
-            new StringContent(body, Encoding.UTF8, "application/json"),
-            cancellationToken);
-
-        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new RolesAnywhereException(
-                $"Simulator CreateSession failed with {(int)response.StatusCode}. Response: {Truncate(payload, 500)}");
-        }
-
-        var result = JsonSerializer.Deserialize<SimulatorSessionResult>(payload, JsonOpts);
-        var credentials = result?.Credentials
-            ?? throw new RolesAnywhereException("The simulator returned no credentials.");
-
-        var expiration = credentials.Expiration ?? DateTimeOffset.UtcNow.AddSeconds(settings.DurationSeconds);
-
-        _logger.LogInformation(
-            "Roles Anywhere session established against the simulator. Expires {Expiration:O}. " +
-            "Note this exercises the wiring only -- the simulator does not verify AWS4-X509 signatures.",
-            expiration);
-
-        return (
-            new SessionAWSCredentials(credentials.AccessKeyId, credentials.SecretAccessKey, credentials.SessionToken),
-            expiration,
-            loaded.Leaf.Subject);
-    }
-
-    private static string ToPem(X509Certificate2 certificate) =>
-        new string(PemEncoding.Write("CERTIFICATE", certificate.RawData));
-
     private static Uri ResolveEndpoint(RolesAnywhereOptions settings, string region) =>
         string.IsNullOrWhiteSpace(settings.EndpointOverride)
             ? new Uri($"https://rolesanywhere.{region}.amazonaws.com")
             : new Uri(settings.EndpointOverride);
+
+    /// <summary>
+    /// Pulls the service's own explanation out of an error body, if it gave one. Returns null
+    /// for an empty body, a non-JSON body, or JSON without a usable message -- all of which
+    /// real AWS produces here.
+    /// </summary>
+    private static string? TryReadMessage(string payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            foreach (var name in (string[])["message", "Message", "error", "errorMessage"])
+            {
+                if (document.RootElement.TryGetProperty(name, out var value) &&
+                    value.ValueKind == JsonValueKind.String)
+                {
+                    var text = value.GetString();
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        return Truncate(text, 500);
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // A non-JSON error body is nothing to report; the caller falls back to its guess.
+        }
+
+        return null;
+    }
 
     private static string Truncate(string value, int max) =>
         string.IsNullOrEmpty(value) || value.Length <= max ? value : value[..max] + "...";
@@ -324,10 +309,6 @@ public sealed class RolesAnywhereCredentialProvider : IRolesAnywhereCredentialPr
         public DateTimeOffset? Expiration { get; set; }
     }
 
-    private sealed class SimulatorSessionResult
-    {
-        public SessionCredentials? Credentials { get; set; }
-    }
 }
 
 /// <summary>

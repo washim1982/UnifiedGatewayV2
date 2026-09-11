@@ -491,3 +491,6 @@ scaffold.log
 # Unified Gateway runtime state
 **/dataprotection-keys/
 data/
+
+# Roles Anywhere client certificate for local development. Never commit key material.
+certs/

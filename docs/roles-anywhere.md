@@ -206,7 +206,6 @@ surfaced here so it can be alerted on rather than left to a calendar reminder.
 | Missing `TrustAnchorArn`, `ProfileArn` or `RoleArn` | All three are required for CreateSession. |
 | `DurationSeconds` outside 900–3600 | AWS returns a bare `ValidationException`. |
 | `EndpointOverride` set outside Development | The host would not be talking to AWS while still reporting healthy. |
-| `UseSimulatorProtocol` outside Development | The simulator does not verify AWS4-X509 signatures. |
 
 At runtime:
 
@@ -222,23 +221,55 @@ At runtime:
 
 ## 7. Development
 
-Development does not use Roles Anywhere. The control plane is the local .NET simulator, which
-needs no AWS credentials at all, and Bedrock deliberately uses the developer's own `~/.aws`
-profile (see [dev-environment.md §7](dev-environment.md)).
+Development uses **the same mechanism and the same code**. The local .NET simulator implements
+the real AWS4-X509 CreateSession contract on `POST /sessions`, so the only setting that differs
+from Production is `EndpointOverride`:
 
-The wiring can still be exercised locally against the simulator's own Roles Anywhere endpoint:
-
-```bash
-curl -X POST "http://localhost:5003/rolesanywhere/generate-test-cert?subject=CN=unified-gateway-dev"
+```jsonc
+"RolesAnywhere": {
+  "TrustAnchorArn": "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/dev-anchor",
+  "ProfileArn":     "arn:aws:rolesanywhere:us-east-1:123456789012:profile/dev-profile",
+  "RoleArn":        "arn:aws:iam::123456789012:role/dev-role",
+  "EndpointOverride": "http://localhost:5003",
+  "Certificate": { "Source": "PemFile", "CertificatePath": "./certs/dev-client.crt",
+                   "PrivateKeyPath": "./certs/dev-client.key", "IncludeChain": false }
+}
 ```
 
-then run with `Gateway__Aws__CredentialSource=RolesAnywhere`,
-`Gateway__Aws__RolesAnywhere__UseSimulatorProtocol=true` and
-`Gateway__Aws__RolesAnywhere__EndpointOverride=http://localhost:5003`.
+Issue a client certificate from the simulator's trust anchor:
 
-**This confirms the wiring, not the protocol.** The simulator verifies a bare RSA signature
-over a string the client chooses; AWS verifies a full AWS4-X509 SigV4 signature. A run that
-succeeds here says the configuration binds, the certificate loads and its key is usable, the
-session is exchanged and the credentials are cached with the right expiry. It says nothing
-about whether the production signature is correct — that is what the signer's unit tests are
-for, and it remains unverified against the real service until a real trust anchor exists.
+```bash
+curl -s -X POST "http://localhost:5003/rolesanywhere/generate-test-cert?subject=CN=unified-gateway-dev"
+```
+
+Write `certPem` to `certs/dev-client.crt` and `privateKeyPem` to `certs/dev-client.key`.
+`certs/` is gitignored.
+
+Note that Bedrock still uses the developer's own `~/.aws` profile in Development — it is the
+one AWS service the simulator does not implement. See
+[dev-environment.md §7](dev-environment.md).
+
+### Rehearsing the failures
+
+Because the simulator enforces what AWS enforces, the common production failures can be
+reproduced locally instead of met for the first time on a deploy:
+
+| To reproduce | Set |
+| :--- | :--- |
+| Trust policy missing `sts:TagSession` / `sts:SetSourceIdentity` | `RoleArn` to `…:role/read-only-role`, which is seeded with a deliberately incomplete trust policy |
+| Role not listed by the profile | any `RoleArn` the profile does not carry |
+| Trust anchor does not resolve | any other `TrustAnchorArn` |
+| Expired client certificate | reissue with `?validityDays=-30` |
+| Replayed request | sign with an `X-Amz-Date` more than five minutes old |
+
+### What this does and does not prove
+
+It proves the production credential path runs end to end: canonical request, string to sign,
+decimal serial in the credential scope, direct asymmetric signing, header set, content type,
+response parsing and certificate loading are all exercised against an independent
+implementation of the same specification.
+
+It does not prove AWS accepts it. Two implementations agreeing means they agree with each
+other; if both misread the same detail, the tests stay green and Production fails. That
+residual risk is retired by one successful `CreateSession` against a real trust anchor, and
+nothing short of it.
