@@ -30,6 +30,7 @@ sequenceDiagram
 - The signature covers `X-Gateway-Server-Id`, so a request signed for another service cannot be replayed here.
 - The request is accepted for `MaxRequestAgeSeconds` (default 300) after its `X-Amz-Date`.
 - The gateway relays only to an allow-listed STS host and only the exact `GetCallerIdentity` call, so it cannot be used as a relay for anything else.
+- It works over HTTPS only. An API call over plain HTTP is refused with `403 HTTPS_REQUIRED` before any of this runs.
 
 ---
 

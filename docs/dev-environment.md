@@ -22,7 +22,9 @@ Development runs against [`DOTNET_AWS_SIMULATOR`](../../../workspace/Projects/DO
 | Test | `Aws` | KMS, Secrets Manager, IAM, Bedrock |
 | Production | `Aws` | KMS, Secrets Manager, IAM, Bedrock |
 
-Going to real AWS is: flip `Provider` to `Aws`, drop the `LocalDotNet` block, point `Crypto.KeyId` at a real alias. No code changes — `StartupValidator` refuses `LocalDotNet` anywhere but Development, so the switch cannot be forgotten.
+Going to real AWS is: flip `Provider` to `Aws`, drop the `LocalDotNet` block, point `Crypto.KeyId` at a real alias. No code changes — `StartupValidator` refuses `LocalDotNet`, and the Python `Simulator` provider, anywhere but Development, so the switch cannot be forgotten. Both simulators accept a bare role name as proof of identity, which is fine on a developer's loopback and nowhere else (SL-01 and SL-03 in [security-architecture-flow.md](security-architecture-flow.md)).
+
+A real environment also refuses to start until its template placeholders are substituted: the Roles Anywhere ARNs and thumbprint, the break-glass principal (`Gateway:Cloud:AccessControl:BreakGlassPrincipalArn`), and the Okta tenant URLs and role mappings.
 
 ---
 
@@ -35,7 +37,7 @@ Your simulator already had the right idea — `IObjectStoreClient` / `IKmsClient
 | `ICryptoProvider` | KmsLocal `/encrypt`, `/decrypt` | KMS |
 | `ISecretsProvider` | KMS-encrypted objects in S3Local | Secrets Manager |
 | `IAccessControlProvider` | `policies` claim from IamLocal, evaluated locally | IAM policy documents |
-| `IIdentityProvider` | IamLocal `/get-caller-identity` | Upstream-asserted principal |
+| `IIdentityProvider` | IamLocal `/get-caller-identity`, or a bare role name (Development only) | Caller-signed `sts:GetCallerIdentity`, verified by STS — see [aws-iam-authentication.md](aws-iam-authentication.md) |
 | Bedrock | **Real Bedrock Runtime**, via the developer's `~/.aws` profile | Bedrock Runtime, via the assumed role |
 
 **Secrets** were the one missing piece: the .NET simulator has no Secrets Manager equivalent. Rather than store them in the clear, the gateway uses the S3 + KMS envelope pattern — the value is encrypted through `ICryptoProvider` before it is written, so the object at rest is ciphertext even in dev. Verified: reading `s3://gateway-secrets/gateway/dev/admin-api-key` directly returns base64 ciphertext, not the `ug_live_…` key.
@@ -110,8 +112,10 @@ Which now matches the production matrix exactly.
 
 - **Bedrock in dev costs real money.** Development calls the real Bedrock Runtime (see §7), so every invocation is billed to whatever account the `~/.aws` profile belongs to. That is the deliberate trade: no local stand-in produces the model output being developed against. Route an application through the `local` provider (Ollama) when the model itself is not what is under test.
 - **Dev keys are dev keys.** KmsLocal protects its master key with DPAPI or a dev key file. Fine locally, meaningless as a security control.
-- **Test now needs real AWS.** Test was previously pointed at the Python simulator; it is now `Aws`, so running the Test environment locally requires credentials, or flipping `Provider` back for a local run.
-- **The Python simulator integration is still in the codebase** (`Provider: "Simulator"`, `Services/Cloud/Simulator/`). No shipped configuration uses it any more. It can be deleted if that project is retired.
+- **Test needs real AWS, and HTTPS.** Test was previously pointed at the Python simulator; it is now `Aws` with `RequireHttps: true`, like Production. Running the Test environment locally therefore needs real credentials, a TLS binding and the template placeholders substituted. Flipping `Provider` back to a simulator is refused outside Development — for a local run against a simulator, use `ASPNETCORE_ENVIRONMENT=Development`.
+- **Management calls by role name work only here.** In Development `X-API-Key: GatewayPlatformAdminRole` authenticates, because IamLocal resolves the name. In AWS mode the same request gets 401: a role name or ARN is an assertion, and automation proves its identity with a signed `GetCallerIdentity` request instead ([aws-iam-authentication.md](aws-iam-authentication.md)).
+- **The Okta simulator runs here and nowhere else.** `appsettings.Development.json` switches it on; the base file leaves it off, and startup refuses it in every other environment.
+- **The Python simulator integration is still in the codebase** (`Provider: "Simulator"`, `Services/Cloud/Simulator/`). No shipped configuration uses it, and startup refuses it outside Development. It can be deleted if that project is retired.
 
 ---
 
@@ -184,7 +188,7 @@ successfully" in that state.
 | `Provider: LocalDotNet` with no `BedrockProvider` | The .NET simulator has no Bedrock at all; every model call would fail at the transport layer with nothing naming the cause. |
 | Bedrock resolves to `Aws` **and** `BedrockServiceUrl` is set | A leftover simulator URL would send "real" traffic to localhost. |
 | Bedrock resolves to `Simulator` **and** `BedrockServiceUrl` is empty | The SDK would call the real regional endpoint with simulated credentials. |
-| `UseLocalProfile: true` outside Development | A developer's own credential is not an identity a shared host may run as; Test and Production assume a role instead. |
+| `UseLocalProfile: true` outside Development | A developer's own credential is not an identity a shared host may run as; Test and Production authenticate with IAM Roles Anywhere instead. |
 
 ### Cost
 

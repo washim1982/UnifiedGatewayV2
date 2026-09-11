@@ -786,7 +786,7 @@ flowchart LR
           <div class="i-loc"><a href="../Services/Telemetry/S3AuditStore.cs#L256-L294">S3AuditStore.cs:256</a> · <a href="../Services/Telemetry/AuditFlushService.cs#L79-L84">AuditFlushService.cs:79</a></div></div>
         <dl class="i-body">
           <div class="i-row"><dt>What</dt><dd>The gateway prunes by deleting S3 objects, so its role can delete its own history. Records wait in memory up to 30 s; failed flushes re-queue without bound; objects are not chained.</dd></div>
-          <div class="i-row"><dt>Fix</dt><dd>S3 Object Lock (compliance mode) with lifecycle retention; drop <code>s3:DeleteObject</code> from the role; bound the buffer; ship to the SIEM — where the new <code>BREAK-GLASS:</code> warnings should alert.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>S3 Object Lock (compliance mode) with lifecycle retention; set <code>Gateway:Storage:AuditRetentionDays</code> to <code>0</code> so the gateway stops pruning (that is the setting <code>PruneAsync</code> reads, not <code>Gateway:Cloud:Storage:RetentionDays</code>); drop <code>s3:DeleteObject</code> from the role; bound the buffer; ship to the SIEM — where the new <code>BREAK-GLASS:</code> warnings should alert.</dd></div>
         </dl>
       </article>
 

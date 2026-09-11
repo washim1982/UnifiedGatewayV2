@@ -43,9 +43,9 @@ A dedicated test (`RepricingAnApplication_DoesNotRestatePastCharges`) pins this.
 
 ## 3. Where the numbers come from
 
-Billing reads the **durable audit trail** (`data/<env>/audit/audit-YYYYMMDD.jsonl`), not the in-memory metrics buffer. So totals survive a restart and cover the full retention window rather than the last few hundred requests. Only the daily files inside the requested window are opened.
+Billing reads the **durable audit trail in object storage**, not the in-memory metrics buffer. The trail is `s3://<bucket>/audit/dt=YYYY-MM-DD/*.jsonl` — S3Local in Development, S3 in Test and Production (see [telemetry-storage.md](telemetry-storage.md)). So totals survive a restart and cover the full retention window rather than the last few hundred requests. Only the `dt=` partitions inside the requested window are listed, and anything still buffered is flushed before the read.
 
-Management-action lines share those files and are skipped by their `kind` marker. A torn trailing line is skipped rather than failing the invoice.
+Management-action lines, including every STS token issuance, share those objects and are skipped by their `kind` marker. A torn trailing line is skipped rather than failing the invoice.
 
 ---
 
@@ -153,5 +153,5 @@ still populated, so wiring a budget indicator back into the header is a UI chang
 - **The projection is naive.** Month-to-date extrapolated at the current daily rate, labelled "at the current daily rate". It is not a forecast and does not model weekday patterns or growth.
 - **Billing is per-invocation, not per-provider-invoice.** These figures are what the gateway's own rate cards say you owe. They will not match an AWS bill unless the rate cards match AWS pricing, and they exclude anything AWS charges that the gateway cannot see.
 - **Failed requests are billed at zero** because they return no tokens. A provider that charges for failed calls would not be reflected.
-- **Aggregation is in-process over JSON files.** Fine at the current retention (30–365 days of daily files) and the window filter keeps a long retention from meaning a full scan. A high-volume deployment wants the SQL registry from Phase 3 and a rollup table.
+- **Aggregation is in-process over the S3 objects.** Fine at current volumes, and the date partitioning keeps a long retention from meaning a full scan. A high-volume deployment wants precomputed daily rollups rather than re-reading raw records on every page load.
 - **Rates are per application, not per model.** An application that falls back to a different model is billed at the application's rate either way, which understates a cheap fallback and overstates an expensive one.

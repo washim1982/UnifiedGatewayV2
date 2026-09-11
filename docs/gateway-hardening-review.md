@@ -10,7 +10,10 @@ Security assessment of the Unified LLM Gateway (`UnifiedGatewayV2`).
 | **Reviewed** | 2026-09-08 |
 | **Findings** | 5 critical · 7 high · 10 medium · 4 low |
 
-> A styled version of this report is at [`gateway-hardening-review.html`](gateway-hardening-review.html).
+> **Historical document.** This is the review of `133e4f5`, before any remediation, and is kept as written.
+> - All 26 findings are closed. See [`hardening-implementation.md`](hardening-implementation.md), and the re-check at [`gateway-hardening-review.html`](gateway-hardening-review.html).
+> - The current assessment is [`security-architecture-flow.md`](security-architecture-flow.md). It covers four later fixes (SL-01 to SL-04) and the items still open.
+>
 > Related: [`../README.md`](../README.md), [`../architecture.md`](../architecture.md).
 
 ---

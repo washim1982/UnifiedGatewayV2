@@ -523,7 +523,7 @@ Code: [`GatewayAuthentication.cs:155-224`](../Auth/GatewayAuthentication.cs#L155
 
 **What happens.** The gateway enforces retention by deleting S3 objects, so its role holds `s3:DeleteObject` on its own trail. Records wait in memory for up to 30 seconds and are lost on a crash, failed flushes re-queue without bound, and objects are not chained or signed.
 
-**Fix.** Enable S3 Object Lock in compliance mode and move retention to a lifecycle rule. Remove `s3:DeleteObject` from the gateway role. Bound the buffer and alert on flush failure. Forward records to the SIEM — which is also where the new `BREAK-GLASS:` warnings should raise alerts.
+**Fix.** Enable S3 Object Lock in compliance mode and move retention to a lifecycle rule. Set `Gateway:Storage:AuditRetentionDays` to `0` so the gateway stops pruning; that, not `Gateway:Cloud:Storage:RetentionDays`, is the setting `PruneAsync` reads. Remove `s3:DeleteObject` from the gateway role. Bound the buffer and alert on flush failure. Forward records to the SIEM — which is also where the new `BREAK-GLASS:` warnings should raise alerts.
 
 ### SL-12 — Disabling access control passes startup validation
 

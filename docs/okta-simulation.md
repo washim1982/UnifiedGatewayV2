@@ -6,7 +6,7 @@ Local Okta behaviour without an Okta tenant: hard-coded users, AD groups and mem
 | :--- | :--- |
 | **Tests** | 80 passing (20 new) |
 | **Verified** | Live, against the AWS simulator and both accounts |
-| **Switch** | `Gateway:Okta:Enabled` — `true` = simulator, `false` = real tenant via OIDC discovery |
+| **Switch** | `Gateway:Okta:Enabled` — `true` = simulator, `false` = real tenant via OIDC discovery. Defaults to `false`; `true` is accepted in Development only. |
 
 ---
 
@@ -38,7 +38,7 @@ The gateway never asks *"is this user an admin?"*. It reads the groups Okta asse
 
 ```
 sign in  ──▶  JWT with groups[]  ──▶  group→role mapping  ──▶  IAM policy evaluation
-                                       (appsettings)           (AWS simulator :5001)
+                                       (appsettings)           (IAM policy engine)
 ```
 
 `Gateway:Okta:GroupRoleMappings`:
@@ -48,7 +48,7 @@ sign in  ──▶  JWT with groups[]  ──▶  group→role mapping  ──�
 "UnifiedGateway-Developers": "arn:aws:iam::123456789012:role/GatewayDeveloperRole"
 ```
 
-A user in no mapped group authenticates but holds no role, so every check denies. Changing what a group may do is an IAM policy edit in [`provision-simulator.py`](../deploy/simulator/provision-simulator.py) — no gateway code changes.
+A user in no mapped group authenticates but holds no role, so every check denies. Changing what a group may do is an IAM policy edit — in Development, in the simulator's provisioning script ([`provision-dotnet-simulator.py`](../deploy/dotnet-simulator/provision-dotnet-simulator.py) for the .NET simulator Development uses); in AWS, in the `/gateway/<env>/access-policy` secret. No gateway code changes.
 
 ---
 
@@ -77,9 +77,12 @@ The signing key is generated per process, so restarting the gateway invalidates 
 A forwarding scheme inspects each request and routes it to the right handler:
 
 - **Bearer token shaped like a JWT** (`eyJ…` with two dots) → Okta validation
-- **Anything else** (API key, `ug_sts_` token, `X-Simulator-Role`) → the existing gateway handler
+- **Anything else** → the gateway's own handler, which accepts only credentials it can verify:
+  - an admin `ug_sts_` token carrying the `admin` scope, or the master key — both act as the configured `BreakGlassPrincipalArn`, and every use is logged as a break-glass event
+  - in AWS mode, a SigV4-signed `sts:GetCallerIdentity` request in `X-Gateway-Aws-Identity`, verified by STS ([`aws-iam-authentication.md`](aws-iam-authentication.md))
+  - in Development against a simulator only, a session key or role name, including `X-Simulator-Role`
 
-So humans sign in through Okta while automation and break-glass keep working unchanged, and neither handler needs to know about the other.
+So humans sign in through Okta, automation proves an IAM identity, break-glass stays available and attributable, and neither handler needs to know about the other.
 
 ---
 
@@ -131,7 +134,7 @@ The token lives in `sessionStorage` for the tab, not `localStorage` — it does 
 
 ## 7. Moving to a real Okta tenant
 
-Configuration only. In `appsettings.Production.json`:
+Configuration only. The base `appsettings.json` is already this template, and `appsettings.Test.json` and `appsettings.Production.json` carry the same shape:
 
 ```jsonc
 "Okta": {
@@ -142,7 +145,9 @@ Configuration only. In `appsettings.Production.json`:
 }
 ```
 
-With `Enabled: false` the simulator endpoints are not mapped and keys come from the tenant's JWKS via OIDC discovery, with rotation handled by the middleware. Validation and group-to-role mapping code is untouched.
+Substitute the tenant URLs and role ARNs at deploy time. Outside Development, startup refuses a `<placeholder>`, an `http://` issuer or metadata address, a role mapping that is not an ARN, and `Enabled: true`.
+
+With the simulator off, its endpoints are not mapped and keys come from the tenant's JWKS via OIDC discovery, with rotation handled by the middleware. Outside Development the endpoints are not mapped, and the in-process key is not trusted, even if the flag were set. Validation and group-to-role mapping code is untouched.
 
 On the Okta side: create the two groups, add a `groups` claim to the authorization server, and set the audience to `unified-gateway`.
 

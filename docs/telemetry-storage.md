@@ -25,6 +25,8 @@ s3://<bucket>/audit/dt=2026-09-10/20260910T122827806Z-0c22966c.jsonl
 
 Objects are newline-delimited JSON, LF only. Invocation records and management-action records share the trail and are distinguished by a `kind` field — billing skips the management lines.
 
+Management records include every STS token issuance: `MintAdminStsToken` for break-glass and `ExchangeApiKeyForStsToken` for application keys, with the token's `jti` in a `tokenId` field alongside the source IP. A token seen in an invocation record can therefore be traced back to where, and from which credential, it was issued.
+
 **Hive-style `dt=` partitioning** means reading a date range lists only the days it needs, and the layout is queryable by Athena or Glue later without a migration.
 
 ---
@@ -88,9 +90,11 @@ In Development the gateway creates the bucket on demand. In Test and Production 
 - **Versioning** — an audit trail that can be silently overwritten is not an audit trail
 - **SSE-KMS** — these records carry token counts, model names and caller identities
 - **A lifecycle rule** matching `RetentionDays`, so expiry is enforced by S3 rather than by the gateway walking the bucket
-- **A bucket policy** denying `s3:DeleteObject` to everything except the lifecycle rule, if you need the trail to be tamper-evident
+- **A bucket policy** denying `s3:DeleteObject` to everything except the lifecycle rule — the gateway's own role included — and **S3 Object Lock** in compliance mode if the trail must be tamper-evident. Today the gateway's role needs delete rights only because of the pruning below (SL-11 in [`security-architecture-flow.md`](security-architecture-flow.md)).
 
-The gateway's own `PruneAsync` exists for Development, where there is no lifecycle rule. In Production, prefer the lifecycle rule and set `RetentionDays: 0` to leave deletion to S3.
+The gateway's own `PruneAsync` exists for Development, where there is no lifecycle rule. It runs once a day and deletes partitions older than **`Gateway:Storage:AuditRetentionDays`**. That is the setting it reads; `Gateway:Cloud:Storage:RetentionDays` above is not consulted by pruning.
+
+In Test and Production, enforce retention with the lifecycle rule and set `Gateway:Storage:AuditRetentionDays` to `0`, so the gateway never deletes from its own trail. The shipped files set it to 30 (Test) and 365 (Production); change it once the lifecycle rule is in place.
 
 ---
 

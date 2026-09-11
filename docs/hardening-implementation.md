@@ -2,9 +2,17 @@
 
 Implements the Phase 0–2 findings from [`gateway-hardening-review.md`](gateway-hardening-review.md) against the local **AWS Simulator** (`C:\Users\wasim\workspace\Projects\AWS-SIMULATOR`), with a provider seam so TEST and PROD run the **same binary** and differ only in configuration.
 
+> **Later changes.** This page records the Phase 0–2 work as delivered. Four gaps found afterwards have since been fixed — SL-01 to SL-04 in [`security-architecture-flow.md`](security-architecture-flow.md):
+> - AWS-mode identity is verified by STS rather than asserted.
+> - Both simulators and the Okta simulator are Development-only.
+> - TLS is enforced by an HTTPS-only IIS binding, with API calls over HTTP refused.
+> - Break-glass tokens are scoped, attributed to a configured principal, and audited.
+>
+> Where this page described the earlier behaviour it has been updated, and says so.
+
 | | |
 | :--- | :--- |
-| **Tests** | 62 passing (was 40) |
+| **Tests** | 62 passing at delivery (was 40); 263 today |
 | **Verified against** | Live simulator — IAM `:5001`, KMS `:5003`, Bedrock `:5004` |
 | **Environments** | `Development` → simulators · `Test` / `Production` → real AWS (the simulators accept a role name as identity, so they are refused outside Development — see SL-01 and SL-03 in [`security-architecture-flow.md`](security-architecture-flow.md)) |
 
@@ -25,7 +33,7 @@ One setting decides which implementation every cloud-facing dependency resolves 
 | Secrets | `ISecretsProvider` | KMS service `/secrets` | Secrets Manager |
 | Crypto | `ICryptoProvider` | KMS service `/encrypt`, `/decrypt` | KMS |
 | Authorization | `IAccessControlProvider` | IAM service `/evaluate-policy` | IAM policy documents |
-| Identity | `IIdentityProvider` | IAM STS sessions / role names | Upstream-asserted principal ARN |
+| Identity | `IIdentityProvider` | IAM STS sessions / role names (Development only) | Caller-signed `sts:GetCallerIdentity`, verified by STS (SL-01) |
 | Bedrock | `AmazonBedrockRuntimeConfig` | `ServiceURL` → `:5004` | Regional endpoint |
 
 **Bedrock needs no adapter at all.** The simulator implements the real wire contract (`POST /model/{modelId}/invoke`, `x-amzn-bedrock-*` response headers), so the AWS SDK talks to it directly — the only difference is `ServiceURL` and placeholder credentials. That is the ideal case; the other three need adapters because the simulator exposes plain REST rather than the AWS JSON-1.1 `X-Amz-Target` protocol.
@@ -54,8 +62,8 @@ One setting decides which implementation every cloud-facing dependency resolves 
 | :--- | :--- | :--- |
 | **H1** | Default admin key, no boot guard | `StartupValidator` refuses to start on a known default key, a config-sourced key outside Development, `EnforceAppApiKey: false`, wildcard CORS, or plaintext HTTP. Key now lives in the secret store. |
 | **H2** | Wildcard CORS | The `AllowAnyOrigin` branch is gone. An empty allow-list means no cross-origin access. |
-| **H3** | No TLS enforcement | `UseHsts` + `UseHttpsRedirection`, gated on `Security:RequireHttps` (exempt only in Development/Test, which are loopback). |
-| **H4** | STS tokens unrevocable | Tokens carry a signing-key **generation**; `POST /api/credentials/rotate-signing-key` mints a new generation and every earlier token stops validating. Plus a `jti` denylist for targeted revocation. Default TTL cut from 1 h to 15 min, ceiling from 7 days to 1 h. |
+| **H3** | No TLS enforcement | `UseHsts` + `UseHttpsRedirection`, gated on `Security:RequireHttps`. *Tightened since (SL-03):* only Development is exempt, because Test is a network host; the IIS installer creates an HTTPS-only binding; API calls over plain HTTP are refused with `403 HTTPS_REQUIRED` rather than redirected. |
+| **H4** | STS tokens unrevocable | Tokens carry a signing-key **generation**; `POST /api/credentials/rotate-signing-key` mints a new generation and every earlier token stops validating. Plus a `jti` denylist for targeted revocation. Default TTL cut from 1 h to 15 min, ceiling from 7 days to 1 h. *Since (SL-04):* admin tokens are capped at 15 minutes and need the `admin` scope on `/api`. |
 | **H5** | Rate limiting gaps | A global limiter as the floor, plus named policies: `per-app`, `token-issuance` (tight — it is the brute-force oracle), `management`. |
 | **H6** | Guardrail ReDoS | 250 ms `matchTimeoutMilliseconds` on all 14 patterns and the inline `Regex.Replace`. A timeout is reported as a `ScanTimeout` violation, so the guardrail **fails closed**. |
 | **H7** | Key ring forges admin tokens | DataProtection removed. Tokens are HMAC-SHA256 signed with a key held in the KMS-encrypted secret store, fetched and cached at runtime. The stale local key ring was deleted. |
@@ -87,6 +95,8 @@ M8  CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy all present
 H7  /gateway/test/sts-signing-key and /gateway/test/admin-api-key stored KMS-encrypted
 ```
 
+The H5 run replayed a single key. A caller who presents a different string on every request gets a fresh rate-limit bucket each time, so this limit does not yet bind unauthenticated traffic — SL-05, still open.
+
 ---
 
 ## 4. Running it
@@ -98,7 +108,7 @@ python deploy/simulator/provision-simulator.py
 ASPNETCORE_ENVIRONMENT=Development Gateway__Cloud__Provider=Simulator dotnet run --no-launch-profile
 ```
 
-`provision-simulator.py` creates the IAM roles and policies the gateway authorizes against, and a KMS key. It is the TEST-environment equivalent of the Terraform that would create the same resources in PROD. The gateway bootstraps its own signing key and admin credential into the secret store on first start.
+`provision-simulator.py` creates the IAM roles and policies the gateway authorizes against, and a KMS key. It is the Development equivalent of the Terraform that creates the same resources in AWS. The gateway bootstraps its own signing key and admin credential into the secret store on first start.
 
 Call the management API as a role (Development only — in AWS mode a role name or ARN is refused, and automation signs a GetCallerIdentity request instead; see [`aws-iam-authentication.md`](aws-iam-authentication.md)):
 
@@ -115,6 +125,11 @@ curl -H "X-API-Key: GatewayPlatformAdminRole" http://localhost:5080/api/apps
 | Secret `/gateway/prod/admin-api-key` | Break-glass credential |
 | Secret `/gateway/prod/access-policy` | IAM policy document the management plane is evaluated against |
 | IAM roles | `GatewayPlatformAdminRole`, `GatewayAppOwnerRole`, `GatewayAuditorRole` |
+| IAM role `GatewayBreakGlassRole` | The principal break-glass acts as. Set it as `Gateway:Cloud:AccessControl:BreakGlassPrincipalArn`, grant it in the access policy, and alert on its use |
+| Okta tenant | Issuer, metadata URL and group-to-role ARNs substituted into `Gateway:Okta` |
+| Server certificate | In `Cert:\LocalMachine\My`, passed to `deploy/iis/install.ps1 -CertificateThumbprint` for the HTTPS-only binding |
+
+The shipped Test and Production files carry `<placeholders>` for the account-specific values above; startup refuses until they are substituted.
 
 The execution role needs `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey`, `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, `secretsmanager:CreateSecret`, and the existing `bedrock:InvokeModel`.
 
@@ -124,10 +139,10 @@ The execution role needs `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey`, `secre
 
 Honest gaps, so nothing here reads as more finished than it is.
 
-- **The AWS provider path is written but unverified.** `AwsSecretsManagerProvider`, `AwsKmsCryptoProvider`, `AwsAccessControlProvider` and `AwsIdentityProvider` compile and follow the same contracts the simulator implementations were tested against, but no real AWS account was available here. Exercise them in a staging account before relying on them.
+- **The AWS provider path is written but unverified.** `AwsSecretsManagerProvider`, `AwsKmsCryptoProvider`, `AwsAccessControlProvider` and `AwsIdentityProvider` (now the STS relay from SL-01) compile and follow the same contracts the simulator implementations were tested against, but no real AWS account was available here. Exercise them in a staging account before relying on them.
 - ~~**`AwsIdentityProvider` trusts an upstream-asserted principal ARN.**~~ **Resolved (SL-01).** It trusted any `arn:aws:` string a client sent, and the IIS deployment had no upstream to verify it. It now relays a caller's SigV4-signed `sts:GetCallerIdentity` request to STS and trusts only the ARN STS returns — see [`aws-iam-authentication.md`](aws-iam-authentication.md).
 - **Generation-based revocation is what actually fires**, not the `jti` check, when the signing key rotates: a new key changes the HMAC, so verification fails before the generation comparison is reached. The generation claim still matters for diagnostics and for a future multi-key overlap window. The `jti` denylist is in-memory only, so it is per-node; the generation lever is the fleet-wide one.
-- **Phases 3–5 are untouched** — durable SQL registry, SIEM export, OIDC operator sign-in, per-app token budgets, CI scanning.
+- **Phases 3–5 are partly done since.** Okta OIDC operator sign-in and CI scanning (`NuGetAudit`, CodeQL, gitleaks) have landed. Still open: a durable SQL registry, SIEM export and per-app token budgets.
 - **`BedrockGuardrails` is still dead config.** `GuardrailIdentifier` is read by nothing (`Models/GuardrailOptions.cs:35`).
 
 ---

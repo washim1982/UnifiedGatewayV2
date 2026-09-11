@@ -211,12 +211,13 @@
   <header class="masthead">
     <div class="eyebrow">Remediation status · Unified LLM Gateway</div>
     <h1>Hardening the Unified Gateway for enterprise exposure</h1>
-    <p class="standfirst">Every finding from the original review, re-checked against the code as it stands. All twenty-six are now closed. What remains are four risks the work since the baseline introduced, and the roadmap phases never started.</p>
+    <p class="standfirst">Every finding from the original review, re-checked against the code as it stood on 2026-09-10. All twenty-six are closed. Below are the four risks the later work introduced and the roadmap phases still to finish. The most serious of those risks, N1, has since been fixed as SL-01. For the current state, see the <a href="security-architecture-flow.html">security architecture review</a>.</p>
     <dl class="facts">
       <div class="fact"><dt>Baseline</dt><dd>133e4f5</dd></div>
       <div class="fact"><dt>Now</dt><dd>working tree</dd></div>
-      <div class="fact"><dt>Tests</dt><dd>130 (was 40)</dd></div>
+      <div class="fact"><dt>Tests</dt><dd>130 at re-check · 263 now</dd></div>
       <div class="fact"><dt>Re-checked</dt><dd>2026-09-10</dd></div>
+      <div class="fact"><dt>Updated</dt><dd>2026-09-11 · N1 fixed</dd></div>
     </dl>
   </header>
 
@@ -224,14 +225,15 @@
     <div class="verdict">
       <p><strong>The findings that gated exposure are closed.</strong> All five criticals and all seven highs are fixed and verified against a running instance: the management plane authenticates and authorizes per action, tokens are revocable, the signing key is off the web tier, guardrail patterns are bounded, and the dashboard's XSS chain no longer reaches the admin credential.</p>
       <p><strong>The long tail is now closed too.</strong> Scope is enforced, every audit record names its caller, backend errors return a reference rather than a description, the sign-off document records its own gaps, and the build fails on a vulnerable dependency — which it did immediately, on six advisories that had been sitting in a package left behind by an earlier fix.</p>
-      <p><strong>The more important change is that the surface grew.</strong> Okta authentication, billing, and S3-backed telemetry were added after the baseline. Those brought four new items that were not in the original 26, and one of them — how the gateway establishes identity in production — deserves attention before this fronts real traffic.</p>
+      <p><strong>The more important change is that the surface grew.</strong> Okta authentication, billing, and S3-backed telemetry were added after the baseline. Those brought four new items that were not in the original 26, and the most serious of them — how the gateway establishes identity in production — has since been fixed (N1 below, SL-01 in the <a href="security-architecture-flow.html">security architecture review</a>).</p>
     </div>
 
     <div class="tally">
       <div class="tally-cell t-closed"><span class="n">26</span><span class="lbl">Closed</span></div>
       
       <div class="tally-cell t-open"><span class="n">0</span><span class="lbl">Open</span></div>
-      <div class="tally-cell t-new"><span class="n">4</span><span class="lbl">New since</span></div>
+      <div class="tally-cell t-new"><span class="n">3</span><span class="lbl">New since, open</span></div>
+      <div class="tally-cell t-closed"><span class="n">1</span><span class="lbl">New since, fixed</span></div>
     </div>
   </section>
 
@@ -253,7 +255,7 @@
 
           <tr><td class="id"><span class="sev sev-high"></span>H1</td><td>Default admin key, no boot guard</td><td><span class="chip c-closed">Closed</span></td><td><code>StartupValidator</code> refuses defaults; no <code>AdminApiKey</code> in base, test or prod config</td></tr>
           <tr><td class="id"><span class="sev sev-high"></span>H2</td><td>Wildcard CORS</td><td><span class="chip c-closed">Closed</span></td><td><code>AllowAnyOrigin</code> branch removed; empty list means no cross-origin access</td></tr>
-          <tr><td class="id"><span class="sev sev-high"></span>H3</td><td>No TLS enforcement</td><td><span class="chip c-closed">Closed</span></td><td><code>UseHsts</code> + <code>UseHttpsRedirection</code>, exempt only on loopback environments</td></tr>
+          <tr><td class="id"><span class="sev sev-high"></span>H3</td><td>No TLS enforcement</td><td><span class="chip c-closed">Closed</span></td><td><code>UseHsts</code> + <code>UseHttpsRedirection</code>; since SL-03 also an HTTPS-only IIS binding, API calls over HTTP refused with <code>HTTPS_REQUIRED</code>, and only Development exempt</td></tr>
           <tr><td class="id"><span class="sev sev-high"></span>H4</td><td>STS tokens unrevocable</td><td><span class="chip c-closed">Closed</span></td><td>Signing-key generation check plus a <code>jti</code> denylist; TTL cut from 7 days to 1 hour</td></tr>
           <tr><td class="id"><span class="sev sev-high"></span>H5</td><td>Rate limiting gaps</td><td><span class="chip c-closed">Closed</span></td><td>Global floor plus <code>per-app</code>, <code>token-issuance</code>, <code>management</code> policies</td></tr>
           <tr><td class="id"><span class="sev sev-high"></span>H6</td><td>Guardrail ReDoS</td><td><span class="chip c-closed">Closed</span></td><td>250 ms timeout on all 14 patterns; a timeout is a violation, not a pass</td></tr>
@@ -358,7 +360,7 @@
     <div class="added">
       <div class="add">
         <span class="add-t">Okta authentication</span>
-        <span class="add-d">Simulated tenant with hard-coded users and AD groups, RS256 tokens with a JWKS endpoint, and group-to-IAM-role mapping. Forgery attempts including <code>alg:none</code> and group escalation all rejected.</span>
+        <span class="add-d">Simulated tenant for Development with hard-coded users and AD groups, RS256 tokens with a JWKS endpoint, and group-to-IAM-role mapping. Since SL-02, the simulator is off by default and startup refuses it outside Development. Forgery attempts including <code>alg:none</code> and group escalation all rejected.</span>
       </div>
       <div class="add">
         <span class="add-t">Role separation, enforced</span>
@@ -392,13 +394,14 @@
       <article class="item i-new">
         <div class="i-head">
           <span class="i-id">N1</span>
-          <h3 class="i-title">In production the gateway does not verify identity itself</h3>
+          <h3 class="i-title">In production the gateway did not verify identity itself</h3>
+          <span class="chip c-closed">Fixed · SL-01</span>
           <div class="i-loc">Services/Cloud/Aws/AwsProviders.cs — AwsIdentityProvider</div>
         </div>
         <dl class="i-body">
           <div class="i-row"><dt>What</dt><dd><code>AwsIdentityProvider</code> reads an asserted principal ARN and checks only that it looks like an ARN. It performs <strong>no SigV4 verification and no OIDC validation</strong>; it assumes an ALB or API Gateway in front has already authenticated the caller.</dd></div>
-          <div class="i-row"><dt>Why it matters</dt><dd>If the gateway is ever reachable directly — a misconfigured security group, a health-check path, an internal caller bypassing the edge — <strong>anyone can assert any role ARN and be believed.</strong> That is the C1 hole again, in a different place. The dev and simulator paths do verify properly; production is the one that does not.</dd></div>
-          <div class="i-row"><dt>Fix</dt><dd>Either verify SigV4 in the gateway, or validate the Okta JWT directly in production the way the simulator path already does, and stop accepting a bare header assertion. Until then, treat direct network reachability as a critical misconfiguration and enforce it at the security group.</dd></div>
+          <div class="i-row"><dt>Why it matters</dt><dd>If the gateway is ever reachable directly — a misconfigured security group, a health-check path, an internal caller bypassing the edge — <strong>anyone can assert any role ARN and be believed.</strong> That is the C1 hole again, in a different place. The IIS deployment has no ALB or API Gateway in front, so this was reachable as shipped. The simulator paths were no better: they accept a bare role name, which is why they are now refused outside Development.</dd></div>
+          <div class="i-row"><dt>Fixed</dt><dd><strong>Closed on 2026-09-11 as SL-01.</strong> The gateway no longer accepts an asserted ARN. Automation presents a SigV4-signed <code>sts:GetCallerIdentity</code> request, which the gateway relays to an allow-listed STS host; it trusts only the ARN STS returns. A bare ARN gets 401. Operators keep signing in through Okta. See <a href="aws-iam-authentication.md">aws-iam-authentication.md</a>.</dd></div>
         </dl>
       </article>
 
@@ -469,8 +472,8 @@
         <div class="phase-body"><p>Security headers, correct status codes and circuit breakers are done. Still open: per-app token budgets that actually refuse requests — the billing page reports spend but enforces nothing.</p></div>
       </div>
       <div class="phase">
-        <div class="phase-tag"><span class="p-n">Phase 5</span><span class="chip c-open">Not started</span></div>
-        <div class="phase-body"><p>No CI gates, no dependency or secret scanning, no penetration test, and the threat model still does not cover the management plane.</p></div>
+        <div class="phase-tag"><span class="p-n">Phase 5</span><span class="chip c-partial">Partly</span></div>
+        <div class="phase-body"><p>CI gates are in: <code>NuGetAudit</code> failing the build, a locked restore, CodeQL and gitleaks (L4 above). Still open are a penetration test and a threat model that covers the management plane. The <a href="security-architecture-flow.html">security architecture review</a> is a start on the second.</p></div>
       </div>
     </div>
   </section>
@@ -479,6 +482,7 @@
     <h3 style="font-family:var(--sans);font-weight:600;font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0;">Scope and method</h3>
     <p>Each of the 26 original findings was re-checked against the working tree by reading the implementing code, not from memory. Behavioural claims — authorization outcomes, token revocation, rate limiting, status codes, storage layout — were confirmed against a running instance backed by the local AWS simulator. The AWS provider path was not executed; see N2.</p>
     <p>The baseline was commit <code>133e4f5</code>. Current state is the working tree on <code>main</code>, which is uncommitted. Line references drift as the code changes. This document supersedes the original review, which described the state before any remediation.</p>
+    <p>Updated 2026-09-11 for the SL-01 to SL-04 fixes: N1 closed, H3 tightened, and the Okta simulator confined to Development. The full current assessment, including what remains open, is <a href="security-architecture-flow.html">security-architecture-flow.html</a>.</p>
   </footer>
 
 </div>
