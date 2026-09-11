@@ -162,11 +162,13 @@ omitted — a sign-off document that only records successes is how gaps get acce
 | :--- | :--- | :--- |
 | Management plane authenticated and authorized | **Implemented** | `RequireAuthorization` on the `/api` group plus a named IAM action per handler — [`DashboardEndpoints.cs`](Endpoints/DashboardEndpoints.cs) |
 | Operator identity via OIDC, roles from group membership | **Implemented** | [`OktaAuthentication.cs`](Auth/OktaAuthentication.cs), [`GatewayAuthentication.cs`](Auth/GatewayAuthentication.cs) |
+| Okta simulator confined to Development | **Implemented** | Off by default; refused at startup outside Development and not mapped there — [`StartupValidator.cs`](Startup/StartupValidator.cs), [`Program.cs`](Program.cs) |
+| Break-glass attributable and scoped | **Implemented** | Acts as the configured `BreakGlassPrincipalArn`, never a caller-chosen name; admin tokens need the `admin` scope on `/api`, live at most 15 minutes, and every mint is audited with its `jti` and source IP — [`GatewayAuthentication.cs`](Auth/GatewayAuthentication.cs), [`ApplicationRegistryService.cs`](Services/ApplicationRegistryService.cs) |
 | Application keys hashed, constant-time verification | **Implemented** | 256-bit CSPRNG keys, SHA-256, `FixedTimeEquals` — [`SecurityService.cs`](Services/SecurityService.cs) |
 | Token revocation (key generation + `jti` denylist) | **Implemented** | [`SecurityService.cs`](Services/SecurityService.cs), [`SigningKeyProvider.cs`](Services/Cloud/SigningKeyProvider.cs) |
-| Token `scope` enforced | **Implemented** | `ScopePermits` gates invoke and admin — [`SecurityService.cs`](Services/SecurityService.cs), [`ApplicationRegistryService.cs`](Services/ApplicationRegistryService.cs) |
+| Token `scope` enforced | **Implemented** | `ScopePermits` gates invoke, universal and the management plane — [`SecurityService.cs`](Services/SecurityService.cs), [`ApplicationRegistryService.cs`](Services/ApplicationRegistryService.cs), [`GatewayAuthentication.cs`](Auth/GatewayAuthentication.cs) |
 | Signing key held off the web tier | **Implemented** | HMAC key in the KMS-backed secret store; DataProtection removed entirely |
-| Mandatory TLS | **Implemented** | `UseHsts` + `UseHttpsRedirection`, exempt only on loopback environments — [`Program.cs`](Program.cs) |
+| Mandatory TLS | **Implemented** | The installer creates an HTTPS-only IIS binding; API calls over HTTP are refused with `HTTPS_REQUIRED` rather than redirected; HSTS; only Development is exempt — [`install.ps1`](deploy/iis/install.ps1), [`HttpsEnforcementMiddleware.cs`](Startup/HttpsEnforcementMiddleware.cs), [`StartupValidator.cs`](Startup/StartupValidator.cs) |
 | Ingress and egress guardrails, fail closed | **Implemented** | A scan that times out is a violation, not a pass — [`GuardrailService.cs`](Services/GuardrailService.cs), [`ModelRouter.cs`](Services/ModelRouter.cs) |
 | Guardrail patterns bounded (ReDoS) | **Implemented** | 250 ms match timeout on all 14 patterns |
 | Rate limiting across the surface | **Implemented** | Global floor plus `per-app`, `token-issuance` and `management` policies |
@@ -182,7 +184,7 @@ omitted — a sign-off document that only records successes is how gaps get acce
 | Registry in a database | **Open** | Still a local file, so the gateway is single-node for writes |
 | SIEM export | **Open** | Nothing ships audit records off-box |
 | Per-app token budgets that refuse requests | **Open** | Billing reports spend; it does not enforce a ceiling |
-| Identity verified by the gateway in AWS mode | **Open** | `AwsIdentityProvider` trusts an upstream-asserted principal ARN; it performs no SigV4 or OIDC verification of its own |
+| Identity verified by the gateway in AWS mode | **Implemented** | Automation presents a SigV4-signed `sts:GetCallerIdentity` request, which the gateway relays to STS; a bare ARN is refused — [`AwsIdentityProvider.cs`](Services/Cloud/Aws/AwsIdentityProvider.cs), [`docs/aws-iam-authentication.md`](docs/aws-iam-authentication.md). Not yet exercised against a real account. |
 | AWS provider path exercised | **Open** | Written against the same contracts as the simulator providers, but never executed against a real account. The Roles Anywhere signing is unit-tested against the certificate's own public key; it has not been verified against a real trust anchor. |
 | Container hardening | **Not applicable** | There is no container; deployment is IIS in-process. The previous claim of non-root execution at UID 1000 described an image that does not exist. |
 | Penetration test | **Open** | Not performed; the threat model above does not yet cover the management plane |

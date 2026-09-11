@@ -30,11 +30,13 @@ public class ConfigureOktaJwtBearerOptions : IConfigureNamedOptions<JwtBearerOpt
 {
     private readonly OktaOptions _okta;
     private readonly IServiceProvider _services;
+    private readonly IHostEnvironment _environment;
 
-    public ConfigureOktaJwtBearerOptions(IOptions<OktaOptions> okta, IServiceProvider services)
+    public ConfigureOktaJwtBearerOptions(IOptions<OktaOptions> okta, IServiceProvider services, IHostEnvironment environment)
     {
         _okta = okta.Value;
         _services = services;
+        _environment = environment;
     }
 
     public void Configure(JwtBearerOptions options) => Configure(OktaClaims.Scheme, options);
@@ -66,7 +68,10 @@ public class ConfigureOktaJwtBearerOptions : IConfigureNamedOptions<JwtBearerOpt
             ValidAlgorithms = [SecurityAlgorithms.RsaSha256]
         };
 
-        if (_okta.Enabled)
+        // The simulated authorization server is trusted only in Development. Elsewhere the flag
+        // is refused at startup; checking it here too means a configuration that slipped past
+        // validation still validates against the real tenant, not a key this process minted.
+        if (_okta.Enabled && _environment.IsDevelopment())
         {
             // Simulated authorization server: trust only the in-process signing key.
             options.RequireHttpsMetadata = false;

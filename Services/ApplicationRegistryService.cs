@@ -398,7 +398,9 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
 
             return (true, app, new CallerContext
             {
-                Actor = payload.CallerId ?? payload.AppId,
+                // The callerId was chosen by whoever minted the token, so it rides along as a
+                // label; the identity recorded is the app, or break-glass for an admin token.
+                Actor = CallerContext.ActorFor(payload),
                 AuthType = payload.IsAdmin ? "AdminStsToken" : "AppStsToken",
                 TokenId = payload.Jti
             });
@@ -429,10 +431,20 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         int durationSeconds = 3600,
         string scope = "invoke",
         string? callerId = null,
+        string? sourceIp = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
             return null;
+
+        // callerId is written into the token and from there into audit records, so it is held
+        // to a charset that cannot forge a log line or carry markup into the dashboard.
+        if (callerId is not null && !CallerIdRegex().IsMatch(callerId))
+        {
+            throw new ArgumentException(
+                "callerId may use letters, digits and . _ @ : / + = - only, up to 128 characters.",
+                nameof(callerId));
+        }
 
         var cleanKey = apiKey.Trim();
         if (cleanKey.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
@@ -445,25 +457,35 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         if (await _adminCredentials.VerifyAsync(cleanKey, cancellationToken))
         {
             var targetAppId = string.IsNullOrWhiteSpace(appId) ? "*" : appId.Trim();
-            var (adminToken, adminExpiresAt) = await _securityService.IssueAppStsTokenAsync(
-                targetAppId,
-                duration,
-                scope,
-                isAdmin: true,
-                callerId: callerId,
-                cancellationToken: cancellationToken);
-
-            return new AppStsTokenResponse
+            var issued = await _securityService.IssueStsTokenAsync(new StsTokenSpec
             {
-                Token = adminToken,
-                TokenType = "Bearer",
                 AppId = targetAppId,
-                DurationSeconds = (int)duration.TotalSeconds,
-                IssuedAt = DateTimeOffset.UtcNow,
-                ExpiresAt = adminExpiresAt,
+                Duration = duration,
                 Scope = scope,
-                IsAdmin = true
-            };
+                IsAdmin = true,
+                CallerId = callerId
+            }, cancellationToken);
+
+            // Break-glass turned into a bearer token is the most sensitive thing this service
+            // does. It is logged at Warning for alerting and written to the audit trail before
+            // the token is handed back.
+            _logger.LogWarning(
+                "BREAK-GLASS: admin STS token {Jti} minted for '{AppId}' with scope '{Scope}', valid until {ExpiresAt:u}, from {SourceIp}.",
+                issued.TokenId, targetAppId, issued.Scope, issued.ExpiresAt, sourceIp ?? "unknown");
+
+            await RecordManagementActionAsync(new ManagementAuditEntry
+            {
+                Action = "MintAdminStsToken",
+                Resource = targetAppId,
+                Actor = "break-glass",
+                AuthType = "MasterAdminKey",
+                SourceIp = sourceIp,
+                TokenId = issued.TokenId,
+                Success = true,
+                Detail = MintDetail(issued, callerId)
+            }, cancellationToken);
+
+            return ToResponse(issued, targetAppId, isAdmin: true);
         }
 
         // B. An application's own long-term key.
@@ -493,25 +515,28 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
             return null;
         }
 
-        var (appToken, appExpiresAt) = await _securityService.IssueAppStsTokenAsync(
-            matchedApp.AppId,
-            duration,
-            scope,
-            isAdmin: false,
-            callerId: callerId,
-            cancellationToken: cancellationToken);
-
-        return new AppStsTokenResponse
+        var issuedToApp = await _securityService.IssueStsTokenAsync(new StsTokenSpec
         {
-            Token = appToken,
-            TokenType = "Bearer",
             AppId = matchedApp.AppId,
-            DurationSeconds = (int)duration.TotalSeconds,
-            IssuedAt = DateTimeOffset.UtcNow,
-            ExpiresAt = appExpiresAt,
+            Duration = duration,
             Scope = scope,
-            IsAdmin = false
-        };
+            IsAdmin = false,
+            CallerId = callerId
+        }, cancellationToken);
+
+        await RecordManagementActionAsync(new ManagementAuditEntry
+        {
+            Action = "ExchangeApiKeyForStsToken",
+            Resource = matchedApp.AppId,
+            Actor = matchedApp.ApiKeyPrefix,
+            AuthType = "AppApiKey",
+            SourceIp = sourceIp,
+            TokenId = issuedToApp.TokenId,
+            Success = true,
+            Detail = MintDetail(issuedToApp, callerId)
+        }, cancellationToken);
+
+        return ToResponse(issuedToApp, matchedApp.AppId, isAdmin: false);
     }
 
     public async Task<AppStsTokenResponse> MintStsTokenDirectAsync(
@@ -525,26 +550,40 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         var duration = TimeSpan.FromSeconds(
             durationSeconds <= 0 ? _options.Security.DefaultStsTokenLifetimeSeconds : durationSeconds);
 
-        var (token, expiresAt) = await _securityService.IssueAppStsTokenAsync(
-            appId,
-            duration,
-            scope,
-            isAdmin,
-            callerId,
-            cancellationToken);
-
-        return new AppStsTokenResponse
+        var issued = await _securityService.IssueStsTokenAsync(new StsTokenSpec
         {
-            Token = token,
-            TokenType = "Bearer",
             AppId = appId,
-            DurationSeconds = (int)duration.TotalSeconds,
-            IssuedAt = DateTimeOffset.UtcNow,
-            ExpiresAt = expiresAt,
+            Duration = duration,
             Scope = scope,
-            IsAdmin = isAdmin
-        };
+            IsAdmin = isAdmin,
+            CallerId = callerId
+        }, cancellationToken);
+
+        return ToResponse(issued, appId, isAdmin);
     }
+
+    private static string MintDetail(IssuedStsToken issued, string? callerId) =>
+        $"scope={issued.Scope}; ttl={(int)(issued.ExpiresAt - issued.IssuedAt).TotalSeconds}s; callerId={callerId ?? "-"}";
+
+    /// <summary>
+    /// The response reports the lifetime the token actually got, not the one requested: the
+    /// ceiling may have shortened it, and a client planning its refresh needs the real figure.
+    /// </summary>
+    private static AppStsTokenResponse ToResponse(IssuedStsToken issued, string appId, bool isAdmin) => new()
+    {
+        Token = issued.Token,
+        TokenType = "Bearer",
+        AppId = appId,
+        DurationSeconds = (int)Math.Round((issued.ExpiresAt - issued.IssuedAt).TotalSeconds),
+        IssuedAt = issued.IssuedAt,
+        ExpiresAt = issued.ExpiresAt,
+        Scope = issued.Scope,
+        IsAdmin = isAdmin,
+        TokenId = issued.TokenId
+    };
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^[A-Za-z0-9._@:/+=-]{1,128}$")]
+    private static partial System.Text.RegularExpressions.Regex CallerIdRegex();
 
     public async Task RecordManagementActionAsync(ManagementAuditEntry entry, CancellationToken cancellationToken = default)
     {

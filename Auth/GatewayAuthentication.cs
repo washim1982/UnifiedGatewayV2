@@ -23,6 +23,15 @@ public static class GatewayAuth
     /// <summary>Claim recording how the caller authenticated, for the audit trail.</summary>
     public const string AuthTypeClaim = "gateway:auth_type";
 
+    /// <summary>Claim carrying the jti of the STS token the caller presented, for the audit trail.</summary>
+    public const string TokenIdClaim = "gateway:token_id";
+
+    /// <summary>
+    /// Header carrying a SigV4-signed sts:GetCallerIdentity request: how automation proves an
+    /// IAM identity in AWS mode. See <see cref="Services.Cloud.Aws.AwsIdentityProvider"/>.
+    /// </summary>
+    public const string AwsIdentityHeader = "X-Gateway-Aws-Identity";
+
     /// <summary>
     /// True when the presented bearer token is shaped like a JWT (three base64url segments
     /// beginning with a JSON header). Gateway STS tokens carry a 'ug_sts_' prefix and so are
@@ -42,12 +51,19 @@ public static class GatewayAuth
 }
 
 /// <summary>
-/// Authenticates management-plane callers. Three credential shapes are accepted, in order:
+/// Authenticates management-plane callers. Every accepted credential is proven, none is
+/// merely asserted:
 ///
-///   1. An IAM session credential (simulator STS access key, or an upstream-asserted
-///      principal ARN in AWS) — resolved through <see cref="IIdentityProvider"/>.
-///   2. A gateway admin STS token (ug_sts_ with isAdmin).
-///   3. The master admin credential from the secret store — break-glass.
+///   1. AWS mode: a signed sts:GetCallerIdentity request in X-Gateway-Aws-Identity, which AWS
+///      itself verifies. In AWS mode it is the only thing the identity provider is shown.
+///   2. A gateway admin STS token (ug_sts_ with isAdmin) carrying the admin scope.
+///   3. The master admin credential from the secret store -- break-glass.
+///   4. Simulator modes only: a simulator session key or role name. Neither proves anything,
+///      which is why they are accepted only when bound to a local simulator, and
+///      StartupValidator allows those bindings in Development alone.
+///
+/// Break-glass, whether used directly or through an admin token minted from it, acts as the
+/// configured BreakGlassPrincipalArn, never as a principal read from the token or the request.
 ///
 /// Authentication only establishes *who* is calling. Whether they may perform the operation
 /// is a separate IAM policy decision made by <see cref="IamAuthorizationHandler"/>.
@@ -75,50 +91,107 @@ public class GatewayAuthenticationHandler : AuthenticationHandler<Authentication
         _cloudOptions = cloudOptions.Value;
     }
 
+    private bool IsSimulatorProvider =>
+        _cloudOptions.Provider is CloudProviderMode.Simulator or CloudProviderMode.LocalDotNet;
+
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        var presented = ExtractCredential(Request);
+        if (_cloudOptions.Provider == CloudProviderMode.Aws)
+        {
+            // A request carrying a signed identity is judged on that alone.
+            var signedIdentity = Request.Headers[GatewayAuth.AwsIdentityHeader].ToString();
+            if (!string.IsNullOrWhiteSpace(signedIdentity))
+            {
+                return await ResolveIdentityAsync(signedIdentity.Trim());
+            }
+
+            // Okta JWTs belong to the Okta scheme. Trying one here as a master key would only
+            // add a failed-authentication warning to every operator request.
+            if (GatewayAuth.LooksLikeJwt(Context))
+            {
+                return AuthenticateResult.NoResult();
+            }
+        }
+
+        var presented = ExtractCredential(Request, allowSimulatorRole: IsSimulatorProvider);
         if (string.IsNullOrWhiteSpace(presented))
         {
             return AuthenticateResult.NoResult();
         }
 
-        // 1. Gateway-issued admin STS token.
         if (presented.StartsWith("ug_sts_", StringComparison.Ordinal))
         {
-            var (isValid, payload, failureReason) = await _security.ValidateAppStsTokenAsync(presented);
-            if (!isValid || payload is null)
-            {
-                Logger.LogWarning("Management STS token rejected: {Reason}", failureReason);
-                return AuthenticateResult.Fail(failureReason ?? "Invalid STS token");
-            }
-
-            if (!payload.IsAdmin)
-            {
-                return AuthenticateResult.Fail("STS token is not an administrative token");
-            }
-
-            return Success(
-                principalArn: BuildPrincipalArn(payload.CallerId ?? payload.AppId),
-                authType: "GatewayAdminStsToken",
-                subject: payload.CallerId ?? payload.AppId);
+            return await AuthenticateAdminTokenAsync(presented);
         }
 
-        // 2. Master admin credential (break-glass).
         if (await _adminCredentials.VerifyAsync(presented))
         {
+            var principal = BreakGlassPrincipal();
+            if (principal is null)
+            {
+                return AuthenticateResult.Fail("Break-glass is not configured on this gateway");
+            }
+
             Logger.LogWarning(
-                "Master admin credential used from {RemoteIp}. This should be rare and alerted on.",
+                "BREAK-GLASS: master admin credential used on the management plane from {RemoteIp}. This should be rare and alerted on.",
                 Context.Connection.RemoteIpAddress);
 
-            return Success(
-                principalArn: BuildPrincipalArn("GatewayBreakGlass"),
-                authType: "MasterAdminKey",
-                subject: "break-glass");
+            return Success(principal, "MasterAdminKey", subject: "break-glass");
         }
 
-        // 3. IAM session credential resolved by the environment's identity provider.
-        var identity = await _identityProvider.ResolveAsync(presented);
+        // Simulator conveniences: session keys and role names. Neither is a secret, so they are
+        // honoured only when the environment is bound to a local simulator.
+        if (IsSimulatorProvider)
+        {
+            return await ResolveIdentityAsync(presented);
+        }
+
+        Logger.LogWarning(
+            "Management authentication failed: unrecognised credential from {RemoteIp}.",
+            Context.Connection.RemoteIpAddress);
+        return AuthenticateResult.Fail("Unrecognised credential");
+    }
+
+    private async Task<AuthenticateResult> AuthenticateAdminTokenAsync(string presented)
+    {
+        var (isValid, payload, failureReason) = await _security.ValidateAppStsTokenAsync(presented);
+        if (!isValid || payload is null)
+        {
+            Logger.LogWarning("Management STS token rejected: {Reason}", failureReason);
+            return AuthenticateResult.Fail(failureReason ?? "Invalid STS token");
+        }
+
+        if (!payload.IsAdmin)
+        {
+            return AuthenticateResult.Fail("STS token is not an administrative token");
+        }
+
+        // The admin flag records who minted the token; the scope records what it may do. A
+        // break-glass token scoped down to 'read' or 'invoke' must not administer anything.
+        if (!SecurityService.ScopePermits(payload.Scope, GatewayScopes.Admin))
+        {
+            Logger.LogWarning(
+                "Admin STS token {Jti} carries scope '{Scope}', which does not permit management operations.",
+                payload.Jti, payload.Scope);
+            return AuthenticateResult.Fail("STS token scope does not permit management operations");
+        }
+
+        var principal = BreakGlassPrincipal();
+        if (principal is null)
+        {
+            return AuthenticateResult.Fail("Break-glass is not configured on this gateway");
+        }
+
+        Logger.LogWarning(
+            "BREAK-GLASS: admin STS token {Jti} used on the management plane from {RemoteIp}.",
+            payload.Jti, Context.Connection.RemoteIpAddress);
+
+        return Success(principal, "GatewayAdminStsToken", CallerContext.ActorFor(payload), payload.Jti);
+    }
+
+    private async Task<AuthenticateResult> ResolveIdentityAsync(string credential)
+    {
+        var identity = await _identityProvider.ResolveAsync(credential, Context.RequestAborted);
         if (identity.IsAuthenticated)
         {
             return Success(identity.PrincipalArn, identity.AuthType, identity.PrincipalArn);
@@ -128,7 +201,25 @@ public class GatewayAuthenticationHandler : AuthenticationHandler<Authentication
         return AuthenticateResult.Fail(identity.FailureReason ?? "Unrecognised credential");
     }
 
-    private AuthenticateResult Success(string principalArn, string authType, string subject)
+    /// <summary>
+    /// The principal break-glass acts as. Configured, never derived from the token or the
+    /// request, so whoever holds the key cannot choose whose name the audit trail records.
+    /// Unset means break-glass is refused, not guessed.
+    /// </summary>
+    private string? BreakGlassPrincipal()
+    {
+        var arn = _cloudOptions.AccessControl.BreakGlassPrincipalArn;
+        if (!string.IsNullOrWhiteSpace(arn) && arn.StartsWith("arn:", StringComparison.Ordinal))
+        {
+            return arn;
+        }
+
+        Logger.LogError(
+            "Break-glass credential presented, but Gateway:Cloud:AccessControl:BreakGlassPrincipalArn is not configured. Refusing.");
+        return null;
+    }
+
+    private AuthenticateResult Success(string principalArn, string authType, string subject, string? tokenId = null)
     {
         var claims = new List<Claim>
         {
@@ -137,24 +228,16 @@ public class GatewayAuthenticationHandler : AuthenticationHandler<Authentication
             new(GatewayAuth.AuthTypeClaim, authType)
         };
 
+        if (!string.IsNullOrEmpty(tokenId))
+        {
+            claims.Add(new Claim(GatewayAuth.TokenIdClaim, tokenId));
+        }
+
         var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, GatewayAuth.Scheme));
         return AuthenticateResult.Success(new AuthenticationTicket(principal, GatewayAuth.Scheme));
     }
 
-    private string BuildPrincipalArn(string roleName)
-    {
-        if (roleName.StartsWith("arn:aws:", StringComparison.OrdinalIgnoreCase))
-        {
-            return roleName;
-        }
-
-        var configured = _cloudOptions.AccessControl.AdminRoleArns.FirstOrDefault();
-        return string.IsNullOrWhiteSpace(configured)
-            ? $"arn:aws:iam::123456789012:role/{roleName}"
-            : configured;
-    }
-
-    private static string ExtractCredential(HttpRequest request)
+    private static string ExtractCredential(HttpRequest request, bool allowSimulatorRole)
     {
         var apiKey = request.Headers["X-API-Key"].ToString();
         if (!string.IsNullOrWhiteSpace(apiKey))
@@ -168,6 +251,11 @@ public class GatewayAuthenticationHandler : AuthenticationHandler<Authentication
             return auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
                 ? auth[7..].Trim()
                 : auth.Trim();
+        }
+
+        if (!allowSimulatorRole)
+        {
+            return string.Empty;
         }
 
         // The simulator's convenience header, accepted so the dashboard and the AWS

@@ -20,6 +20,7 @@ public static class DashboardEndpoints
                     ?? ctx.User.FindFirst(ClaimTypes.NameIdentifier)?.Value,
             AuthType = ctx.User.FindFirst(GatewayAuth.AuthTypeClaim)?.Value,
             SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+            TokenId = ctx.User.FindFirst(GatewayAuth.TokenIdClaim)?.Value,
             Success = success,
             Detail = detail
         };
@@ -210,7 +211,7 @@ public static class DashboardEndpoints
 
             await registry.RecordManagementActionAsync(
                 Audit(ctx, "MintStsToken", appId, success: true,
-                      $"scope={tokenResp.Scope}; ttl={tokenResp.DurationSeconds}s"), ct);
+                      $"scope={tokenResp.Scope}; ttl={tokenResp.DurationSeconds}s; minted={tokenResp.TokenId}"), ct);
 
             return Results.Ok(tokenResp);
         })

@@ -213,17 +213,36 @@ public class HardeningTests
         WithRolesAnywhere(gateway);
 
         var cloud = new CloudOptions { Provider = CloudProviderMode.Aws };
+        cloud.AccessControl.BreakGlassPrincipalArn = "arn:aws:iam::111122223333:role/GatewayBreakGlassRole";
 
         StartupValidator.Validate(gateway, cloud, new FakeEnvironment());
     }
 
     [Fact]
-    public void Startup_AcceptsTheSimulatorInTest()
+    public void Startup_AcceptsTheSimulatorInDevelopment()
     {
         var gateway = new GatewayOptions();
         gateway.Security.RequireHttps = false;
         gateway.Security.AllowedCorsOrigins = ["http://localhost:3000"];
 
+        var cloud = new CloudOptions
+        {
+            Provider = CloudProviderMode.Simulator,
+            BedrockServiceUrl = "http://localhost:5004"
+        };
+
+        StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Development" });
+    }
+
+    [Theory]
+    [InlineData("Test")]
+    [InlineData("Staging")]
+    public void Startup_RefusesTheSimulatorOutsideDevelopment(string environmentName)
+    {
+        // The simulator accepts a role name as proof of identity. That proves nothing, so it
+        // cannot run anywhere a network can reach -- Test included.
+        var gateway = new GatewayOptions();
+        gateway.Security.AllowedCorsOrigins = ["https://gateway.test.internal"];
         WithRolesAnywhere(gateway);
 
         var cloud = new CloudOptions
@@ -232,7 +251,10 @@ public class HardeningTests
             BedrockServiceUrl = "http://localhost:5004"
         };
 
-        StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = "Test" });
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StartupValidator.Validate(gateway, cloud, new FakeEnvironment { EnvironmentName = environmentName }));
+
+        Assert.Contains("Simulator", ex.Message);
     }
 
     // --- M6: the scope claim is enforced, not decorative -----------------------------

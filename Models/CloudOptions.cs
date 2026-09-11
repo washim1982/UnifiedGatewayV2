@@ -34,6 +34,9 @@ public class CloudOptions
     public AccessControlOptions AccessControl { get; set; } = new();
     public AuditStorageOptions Storage { get; set; } = new();
 
+    /// <summary>Machine identity for the management plane in AWS mode. See <see cref="AwsIdentityOptions"/>.</summary>
+    public AwsIdentityOptions AwsIdentity { get; set; } = new();
+
     /// <summary>
     /// Overrides <see cref="Provider"/> for Bedrock alone. Null means "follow Provider".
     ///
@@ -168,4 +171,55 @@ public class AccessControlOptions
     /// "any authenticated principal, subject to policy evaluation".
     /// </summary>
     public string[] AdminRoleArns { get; set; } = [];
+
+    /// <summary>
+    /// Principal the break-glass credential acts as -- directly, and through every admin STS
+    /// token minted from it. Fixed server-side so that neither the key holder nor anything
+    /// written into a token chooses whose name the audit trail records. Required outside
+    /// Development; with it unset, break-glass is refused rather than guessed.
+    /// </summary>
+    public string BreakGlassPrincipalArn { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Lets automation prove an IAM identity to the management plane in AWS mode.
+///
+/// The caller signs an sts:GetCallerIdentity request with its own AWS credentials and hands
+/// the gateway the signed request -- never the credentials. The gateway forwards it to STS
+/// and trusts only the ARN STS answers with. Nothing the caller merely asserts, such as an
+/// ARN in a header, is accepted as an identity.
+/// </summary>
+public class AwsIdentityOptions
+{
+    /// <summary>
+    /// Accept signed GetCallerIdentity requests. Off means only Okta sign-in and break-glass
+    /// reach the management plane.
+    /// </summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Value the caller must sign into the X-Gateway-Server-Id header. Binds a signed request
+    /// to this gateway, so one captured by another service using the same pattern cannot be
+    /// replayed here. It is not a secret; it is binding only because the header is signed.
+    /// </summary>
+    public string ServerId { get; set; } = string.Empty;
+
+    /// <summary>AWS accounts whose principals may authenticate. Required when enabled.</summary>
+    public string[] AllowedAccountIds { get; set; } = [];
+
+    /// <summary>
+    /// STS hostnames a signed request may be sent to. Empty means the global endpoint plus
+    /// the configured region's. The gateway forwards nowhere else, which is what keeps it
+    /// from being an open relay.
+    /// </summary>
+    public string[] AllowedStsHosts { get; set; } = [];
+
+    /// <summary>Oldest X-Amz-Date accepted, in seconds. STS itself allows fifteen minutes.</summary>
+    public int MaxRequestAgeSeconds { get; set; } = 300;
+
+    /// <summary>How long a verified identity is reused for the same signed request.</summary>
+    public int CacheSeconds { get; set; } = 60;
+
+    /// <summary>Seconds to wait on STS.</summary>
+    public int TimeoutSeconds { get; set; } = 10;
 }

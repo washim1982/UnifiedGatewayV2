@@ -30,4 +30,16 @@ public record CallerContext
 
     /// <summary>An unattributed context, for callers that genuinely have no identity.</summary>
     public static CallerContext Anonymous() => new() { Actor = null, AuthType = "Anonymous" };
+
+    /// <summary>
+    /// Actor for a caller authenticated by an STS token. The token's callerId is whatever the
+    /// minter typed, so it is carried as a bracketed label beside an identity the gateway
+    /// derived itself -- the application, or break-glass for an admin token -- and never as
+    /// the identity.
+    /// </summary>
+    public static string ActorFor(AppStsTokenPayload payload)
+    {
+        var identity = payload.IsAdmin ? "break-glass" : payload.AppId;
+        return string.IsNullOrWhiteSpace(payload.CallerId) ? identity : $"{identity} [{payload.CallerId}]";
+    }
 }

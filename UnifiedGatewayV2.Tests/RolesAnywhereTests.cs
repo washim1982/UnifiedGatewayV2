@@ -493,7 +493,14 @@ public class RolesAnywhereTests
     private static void Validate(GatewayOptions gateway, string environment = "Production") =>
         UnifiedGateway.Startup.StartupValidator.Validate(
             gateway,
-            new CloudOptions { Provider = CloudProviderMode.Aws },
+            new CloudOptions
+            {
+                Provider = CloudProviderMode.Aws,
+                AccessControl = new AccessControlOptions
+                {
+                    BreakGlassPrincipalArn = "arn:aws:iam::1:role/GatewayBreakGlassRole"
+                }
+            },
             new FakeEnvironment { EnvironmentName = environment });
 
     [Theory]

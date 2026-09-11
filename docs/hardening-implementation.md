@@ -6,7 +6,7 @@ Implements the Phase 0–2 findings from [`gateway-hardening-review.md`](gateway
 | :--- | :--- |
 | **Tests** | 62 passing (was 40) |
 | **Verified against** | Live simulator — IAM `:5001`, KMS `:5003`, Bedrock `:5004` |
-| **Environments** | `Development` / `Test` → Simulator · `Production` → real AWS |
+| **Environments** | `Development` → simulators · `Test` / `Production` → real AWS (the simulators accept a role name as identity, so they are refused outside Development — see SL-01 and SL-03 in [`security-architecture-flow.md`](security-architecture-flow.md)) |
 
 ---
 
@@ -91,16 +91,16 @@ H7  /gateway/test/sts-signing-key and /gateway/test/admin-api-key stored KMS-enc
 
 ## 4. Running it
 
-**TEST** — against the simulator:
+**Development against the Python simulator.** The simulator accepts a bare role name as an identity, which proves nothing, so it is refused outside Development (SL-01 and SL-03 in [`security-architecture-flow.md`](security-architecture-flow.md)). Test now runs against real AWS like Production.
 
 ```bash
 python deploy/simulator/provision-simulator.py
-ASPNETCORE_ENVIRONMENT=Test dotnet run --no-launch-profile
+ASPNETCORE_ENVIRONMENT=Development Gateway__Cloud__Provider=Simulator dotnet run --no-launch-profile
 ```
 
 `provision-simulator.py` creates the IAM roles and policies the gateway authorizes against, and a KMS key. It is the TEST-environment equivalent of the Terraform that would create the same resources in PROD. The gateway bootstraps its own signing key and admin credential into the secret store on first start.
 
-Call the management API as a role:
+Call the management API as a role (Development only — in AWS mode a role name or ARN is refused, and automation signs a GetCallerIdentity request instead; see [`aws-iam-authentication.md`](aws-iam-authentication.md)):
 
 ```bash
 curl -H "X-API-Key: GatewayPlatformAdminRole" http://localhost:5080/api/apps
@@ -125,7 +125,7 @@ The execution role needs `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey`, `secre
 Honest gaps, so nothing here reads as more finished than it is.
 
 - **The AWS provider path is written but unverified.** `AwsSecretsManagerProvider`, `AwsKmsCryptoProvider`, `AwsAccessControlProvider` and `AwsIdentityProvider` compile and follow the same contracts the simulator implementations were tested against, but no real AWS account was available here. Exercise them in a staging account before relying on them.
-- **`AwsIdentityProvider` trusts an upstream-asserted principal ARN.** It rejects anything that is not an ARN, but it does not itself verify a SigV4 signature — it assumes an ALB or API Gateway in front has authenticated the caller. If the gateway is ever exposed directly, this needs to become real SigV4 or OIDC verification (Phase 1 of the review).
+- ~~**`AwsIdentityProvider` trusts an upstream-asserted principal ARN.**~~ **Resolved (SL-01).** It trusted any `arn:aws:` string a client sent, and the IIS deployment had no upstream to verify it. It now relays a caller's SigV4-signed `sts:GetCallerIdentity` request to STS and trusts only the ARN STS returns — see [`aws-iam-authentication.md`](aws-iam-authentication.md).
 - **Generation-based revocation is what actually fires**, not the `jti` check, when the signing key rotates: a new key changes the HMAC, so verification fails before the generation comparison is reached. The generation claim still matters for diagnostics and for a future multi-key overlap window. The `jti` denylist is in-memory only, so it is per-node; the generation lever is the fleet-wide one.
 - **Phases 3–5 are untouched** — durable SQL registry, SIEM export, OIDC operator sign-in, per-app token budgets, CI scanning.
 - **`BedrockGuardrails` is still dead config.** `GuardrailIdentifier` is read by nothing (`Models/GuardrailOptions.cs:35`).

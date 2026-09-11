@@ -150,6 +150,7 @@ On the Okta side: create the two groups, add a `groups` claim to the authorizati
 
 ## 8. Known gaps
 
+- **Development only, enforced.** The simulator signs admin tokens for users compiled into the binary, so it must never run where a network can reach it. `Gateway:Okta:Enabled` defaults to `false`, `StartupValidator` refuses it outside Development, `Program.cs` maps the simulator endpoints only in Development, and JWT validation trusts the in-process key only there (SL-02 in [`security-architecture-flow.md`](security-architecture-flow.md)).
 - **Password grant, not authorization code.** Real Okta would redirect through a hosted login page with PKCE. The password grant keeps the local loop to one call; it is not a pattern to carry into production, and the real-tenant path should use the authorization-code flow.
 - **First matching group wins.** A user in both groups gets whichever appears first in their token. Fine for two disjoint groups; a real deployment with overlapping membership needs a precedence rule.
 - **No refresh tokens.** A session lasts until the token expires (60 minutes) or the gateway restarts.

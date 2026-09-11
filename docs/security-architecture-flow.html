@@ -1,0 +1,895 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway Security Architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+  :root {
+    --ground: #eef1f4;
+    --surface: #ffffff;
+    --surface-sunk: #e6eaee;
+    --ink: #141920;
+    --ink-soft: #3d4855;
+    --muted: #66727f;
+    --rule: #d5dbe2;
+    --rule-soft: #e3e8ed;
+    --accent: #26566f;
+
+    --closed: #2c6449;
+    --closed-bg: #dfeee6;
+    --partial: #a4620f;
+    --partial-bg: #f9ebda;
+    --open: #9c2a26;
+    --open-bg: #f7e4e2;
+
+    --crit: #9c2a26;
+    --high: #a4620f;
+    --med: #6d6417;
+    --low: #46606f;
+
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #11151a; --surface: #181d23; --surface-sunk: #1f252c;
+      --ink: #e2e7ec; --ink-soft: #bcc5cf; --muted: #8b97a4;
+      --rule: #2b333c; --rule-soft: #232a32; --accent: #7fb3d1;
+      --closed: #6dbb94; --closed-bg: #1a2a23;
+      --partial: #dda054; --partial-bg: #322619;
+      --open: #e2726c; --open-bg: #33201f;
+      --crit: #e2726c; --high: #dda054; --med: #c2b45c; --low: #90a9b8;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #11151a; --surface: #181d23; --surface-sunk: #1f252c;
+    --ink: #e2e7ec; --ink-soft: #bcc5cf; --muted: #8b97a4;
+    --rule: #2b333c; --rule-soft: #232a32; --accent: #7fb3d1;
+    --closed: #6dbb94; --closed-bg: #1a2a23;
+    --partial: #dda054; --partial-bg: #322619;
+    --open: #e2726c; --open-bg: #33201f;
+    --crit: #e2726c; --high: #dda054; --med: #c2b45c; --low: #90a9b8;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); text-underline-offset: 2px; }
+
+  .page { max-width: 1040px; margin: 0 auto; padding: 40px 28px 96px; display: flex; flex-direction: column; gap: 48px; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent);
+  }
+
+  h1 {
+    font-family: var(--serif); font-weight: 600;
+    font-size: clamp(30px, 5vw, 44px); line-height: 1.12;
+    letter-spacing: -0.015em; margin: 0; text-wrap: balance;
+  }
+
+  .standfirst { font-size: 17px; line-height: 1.55; color: var(--ink-soft); max-width: 66ch; margin: 0; }
+
+  .masthead { display: flex; flex-direction: column; gap: 18px; }
+
+  .facts {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 2px; background: var(--rule); border: 1px solid var(--rule); margin: 6px 0 0;
+  }
+  .fact { background: var(--surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+  .fact dt { font-family: var(--mono); font-size: 10px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--muted); }
+  .fact dd { margin: 0; font-size: 13.5px; font-family: var(--mono); color: var(--ink); }
+
+  section { display: flex; flex-direction: column; gap: 20px; }
+
+  h2 {
+    font-family: var(--serif); font-weight: 600; font-size: 25px;
+    letter-spacing: -0.01em; margin: 0; padding-bottom: 10px;
+    border-bottom: 2px solid var(--ink); text-wrap: balance;
+  }
+
+  section > h3 {
+    font-family: var(--serif); font-weight: 600; font-size: 19px; margin: 10px 0 0;
+  }
+
+  p { margin: 0; max-width: 72ch; }
+  .lede { color: var(--ink-soft); }
+
+  code {
+    font-family: var(--mono); font-size: 0.875em; background: var(--surface-sunk);
+    padding: 1px 5px; border-radius: 2px; word-break: break-word;
+  }
+
+  /* --- verdict + tally --- */
+
+  .verdict {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-left: 4px solid var(--closed); padding: 20px 22px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .verdict p { max-width: 76ch; }
+  .verdict strong { font-weight: 600; }
+
+  .tally {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 2px; background: var(--rule); border: 1px solid var(--rule);
+  }
+  .tally-cell { background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; border-top: 3px solid transparent; }
+  .tally-cell .n { font-family: var(--mono); font-size: 27px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+  .tally-cell .lbl { font-family: var(--mono); font-size: 10px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--muted); }
+  .t-closed { border-top-color: var(--closed); } .t-closed .n { color: var(--closed); }
+  .t-open { border-top-color: var(--open); } .t-open .n { color: var(--open); }
+  .t-partial { border-top-color: var(--partial); } .t-partial .n { color: var(--partial); }
+  .t-low { border-top-color: var(--low); } .t-low .n { color: var(--low); }
+
+  /* --- tables --- */
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 680px; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  th {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.11em; text-transform: uppercase;
+    color: var(--muted); background: var(--surface-sunk); border-bottom: 1px solid var(--rule); white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: none; }
+  td.id { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  td .where { display: block; margin-top: 4px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  td .where a { color: var(--muted); }
+  .sev { display: inline-block; width: 3px; height: 13px; border-radius: 2px; margin-right: 7px; vertical-align: -2px; }
+  .sev-crit { background: var(--crit); } .sev-high { background: var(--high); }
+  .sev-med { background: var(--med); } .sev-low { background: var(--low); }
+
+  .chip {
+    font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 2px; white-space: nowrap; display: inline-block;
+  }
+  .c-closed { background: var(--closed-bg); color: var(--closed); }
+  .c-partial { background: var(--partial-bg); color: var(--partial); }
+  .c-open { background: var(--open-bg); color: var(--open); }
+
+  /* --- diagrams --- */
+
+  figure.diagram {
+    margin: 0; background: var(--surface); border: 1px solid var(--rule);
+    padding: 18px 18px 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  figure.diagram .canvas { overflow-x: auto; }
+  figure.diagram figcaption { font-size: 13px; color: var(--muted); max-width: 80ch; }
+  pre.mermaid {
+    margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+    background: transparent; white-space: pre; text-align: center;
+  }
+  pre.mermaid svg { max-width: 100%; height: auto; }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--ink-soft); }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; border: 1px solid; }
+  .sw-gap { background: #fde2e1; border-color: #c0392b; }
+  .sw-fixed { background: #dff1e6; border-color: #2c6449; }
+  .sw-stop { background: #eeeeee; border-color: #888888; }
+
+  /* --- loop cards --- */
+
+  .items { display: flex; flex-direction: column; gap: 14px; }
+  .item {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-left-width: 4px; border-left-style: solid; padding: 16px 20px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .i-closed { border-left-color: var(--closed); }
+  .i-medium { border-left-color: var(--partial); }
+  .i-low { border-left-color: var(--low); }
+
+  .i-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+  .i-id { font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 2px; }
+  .i-closed .i-id { background: var(--closed-bg); color: var(--closed); }
+  .i-medium .i-id { background: var(--partial-bg); color: var(--partial); }
+  .i-low .i-id { background: var(--surface-sunk); color: var(--low); }
+  .i-title { font-weight: 600; font-size: 16.5px; margin: 0; line-height: 1.3; flex: 1 1 280px; text-wrap: balance; }
+  .i-loc { font-family: var(--mono); font-size: 11.5px; color: var(--muted); flex-basis: 100%; overflow-x: auto; white-space: nowrap; }
+  .i-loc a { color: var(--muted); }
+
+  .i-body { display: flex; flex-direction: column; gap: 9px; margin: 0; }
+  .i-row { display: grid; grid-template-columns: 74px 1fr; gap: 14px; align-items: start; }
+  .i-row dt { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); padding-top: 4px; }
+  .i-row dd { margin: 0; font-size: 14.5px; line-height: 1.55; color: var(--ink-soft); }
+  .i-row dd strong { color: var(--ink); font-weight: 600; }
+  .i-row dd ul { margin: 4px 0 0; padding-left: 18px; }
+  .i-row dd li { margin: 2px 0; }
+
+  @media (max-width: 560px) {
+    .i-row { grid-template-columns: 1fr; gap: 2px; }
+    .i-row dt { padding-top: 0; }
+  }
+
+  /* --- holds up --- */
+
+  .added { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 2px; background: var(--rule); border: 1px solid var(--rule); }
+  .add { background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .add-t { font-weight: 600; font-size: 14.5px; color: var(--closed); }
+  .add-d { font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
+
+  /* --- phases --- */
+
+  .phases { display: flex; flex-direction: column; gap: 0; }
+  .phase { display: grid; grid-template-columns: 170px 1fr; gap: 22px; padding: 18px 0; border-top: 1px solid var(--rule); }
+  .phase:last-child { border-bottom: 1px solid var(--rule); }
+  .phase-tag { display: flex; flex-direction: column; gap: 4px; }
+  .phase-tag .p-n { font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+  .phase-tag .p-l { font-size: 13px; color: var(--muted); }
+  .phase-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .phase-body p { font-size: 14.5px; color: var(--ink-soft); }
+  @media (max-width: 620px) { .phase { grid-template-columns: 1fr; gap: 8px; } }
+
+  footer { border-top: 1px solid var(--rule); padding-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+  footer p { font-size: 13.5px; color: var(--muted); max-width: 80ch; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow">Security architecture · Unified LLM Gateway</div>
+    <h1>How the gateway is defended, and where it still leaks</h1>
+    <p class="standfirst">Every control a request passes through, why each one is there, and the seventeen gaps a review of the design found. The four that let an outsider in — a management plane that trusted an asserted ARN, an admin-issuing Okta simulator, TLS that the installer never switched on, and unscoped break-glass tokens — are now fixed and covered by tests. Thirteen medium and low items remain.</p>
+    <dl class="facts">
+      <div class="fact"><dt>Reviewed</dt><dd>main · 57f9858</dd></div>
+      <div class="fact"><dt>Fixes</dt><dd>working tree, uncommitted</dd></div>
+      <div class="fact"><dt>Tests</dt><dd>263 passing (was 195)</dd></div>
+      <div class="fact"><dt>Date</dt><dd>2026-09-10</dd></div>
+      <div class="fact"><dt>Deployment</dt><dd>IIS · Provider=Aws</dd></div>
+    </dl>
+  </header>
+
+  <!-- ===================================================================== -->
+  <section id="summary">
+    <h2>Summary</h2>
+
+    <div class="verdict">
+      <p><strong>The data plane was sound; the way into the management plane was not.</strong> Application keys are 256-bit and stored only as hashes, STS tokens are signed and short-lived, and both guardrails fail closed. But in AWS mode — the mode Production runs — any caller could name the admin role in a header and be treated as it, over plain HTTP, because the installer never created an HTTPS binding. That chain is now closed at every link.</p>
+      <p>What remains open are depth issues rather than open doors: rate limits a caller can sidestep, revocation that cannot target a single app, guardrail changes that are under-audited, routing that can send on-prem data to the cloud, backends reachable around the gateway, and an audit trail the gateway itself can delete.</p>
+    </div>
+
+    <div class="tally">
+      <div class="tally-cell t-closed"><span class="n">4</span><span class="lbl">Fixed</span></div>
+      <div class="tally-cell t-open"><span class="n">0</span><span class="lbl">Critical / high open</span></div>
+      <div class="tally-cell t-partial"><span class="n">8</span><span class="lbl">Medium open</span></div>
+      <div class="tally-cell t-low"><span class="n">5</span><span class="lbl">Low open</span></div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Was</th><th>Now</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="id"><span class="sev sev-crit"></span>SL-01</td><td>In AWS mode any <code>arn:aws:…</code> string was accepted as an authenticated identity. Sending the admin role's ARN granted full management access.</td><td>Automation proves its IAM identity with a SigV4-signed <code>sts:GetCallerIdentity</code> request that AWS verifies. A bare ARN gets 401.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-high"></span>SL-02</td><td>The Okta simulator, with a hard-coded admin, ran in any environment that did not switch it off.</td><td>Off by default; refused at startup outside Development and not mapped there.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-high"></span>SL-03</td><td>The IIS installer created an HTTP-only site, so "mandatory TLS" did nothing. Test was exempt despite being networked.</td><td>HTTPS-only binding; API calls over HTTP refused with <code>HTTPS_REQUIRED</code>; only Development exempt.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-high"></span>SL-04</td><td>Admin STS tokens skipped scope on <code>/api</code>, chose their own identity, and were minted with no audit record.</td><td>Admin scope required; break-glass acts as a configured principal; every mint audited and alerted; 15-minute cap.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="context">
+    <h2>System context and trust boundaries</h2>
+    <p class="lede">Four caller types reach one IIS host. Behind it the gateway talks to AWS for identity, secrets, audit storage and models, and to on-prem inference servers over the local network.</p>
+
+    <figure class="diagram">
+      <div class="canvas">
+<pre class="mermaid">
+flowchart LR
+    subgraph U["Untrusted — corporate network and callers"]
+        APP["Client applications&lt;br/&gt;ug_live_ key or ug_sts_ token"]
+        OPS["Operators in a browser&lt;br/&gt;Okta sign-in"]
+        AUTO["Automation&lt;br/&gt;signed GetCallerIdentity"]
+        BGL["Break-glass&lt;br/&gt;master key or admin STS token"]
+    end
+
+    subgraph H["Windows Server host"]
+        IIS["IIS site&lt;br/&gt;HTTPS-only binding · body cap"]
+        subgraph P["Gateway process · .NET 8"]
+            EDGE["Edge&lt;br/&gt;HTTP API calls refused · HSTS · CSP · CORS · rate limits"]
+            AUTHN["Authentication&lt;br/&gt;key hash · STS HMAC · Okta JWT · STS-verified IAM"]
+            AUTHZ["Authorization&lt;br/&gt;IAM action per endpoint · scope · app isolation"]
+            GR["Guardrails&lt;br/&gt;ingress and egress"]
+            RT["Router&lt;br/&gt;size limits · fallback · circuit breaker"]
+            CRED["Credential service&lt;br/&gt;temporary AWS credentials"]
+            AUD["Audit buffer"]
+            REG[("App registry&lt;br/&gt;local JSON file")]
+        end
+    end
+
+    subgraph AWS["AWS account"]
+        RA["IAM Roles Anywhere"]
+        STS["AWS STS"]
+        SM["Secrets Manager&lt;br/&gt;signing key · admin key · access policy"]
+        KMS["KMS"]
+        S3[("S3 audit bucket")]
+        BR["Bedrock Runtime"]
+    end
+
+    subgraph LAN["On-prem inference network"]
+        LLM["Ollama · LM Studio · llama.cpp&lt;br/&gt;plain HTTP, no auth"]
+    end
+
+    OKTA["Okta tenant&lt;br/&gt;OIDC discovery and JWKS"]
+
+    APP --> IIS
+    OPS --> IIS
+    AUTO --> IIS
+    BGL --> IIS
+    IIS --> EDGE --> AUTHN --> AUTHZ --> GR --> RT
+    AUTHZ --> REG
+    RT -- "SigV4" --> BR
+    RT -- "HTTP" --> LLM
+    RT --> AUD --> S3
+    OPS -. "sign-in" .-> OKTA
+    AUTHN -. "JWKS" .-> OKTA
+    AUTHN -. "relay signed request" .-> STS
+    AUTHN -. "keys" .-> SM
+    AUTHZ -. "policy" .-> SM
+    CRED -. "X.509 CreateSession" .-> RA
+    SM -. "envelope encryption" .-> KMS
+</pre>
+      </div>
+      <figcaption>Solid arrows carry requests; dotted arrows are the gateway's own calls for identity, keys and credentials.</figcaption>
+    </figure>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Boundary</th><th>What crosses it</th><th>What must hold</th></tr></thead>
+        <tbody>
+          <tr><td>Network → IIS</td><td>API keys, STS tokens, Okta JWTs, signed identity requests, prompts with regulated data</td><td>TLS on every hop; nothing trusted from a header unless it is a verified credential</td></tr>
+          <tr><td>IIS → gateway logic</td><td>An authenticated principal</td><td>Every identity proven cryptographically; authorization per action and per app</td></tr>
+          <tr><td>Gateway → AWS STS</td><td>A caller's signed GetCallerIdentity request</td><td>Relayed only to allow-listed STS hosts, only that exact call, only the signed headers</td></tr>
+          <tr><td>Gateway → Bedrock</td><td>Sanitised prompts, SigV4-signed with temporary credentials</td><td>Only redacted content leaves; no long-lived AWS key on the host</td></tr>
+          <tr><td>Gateway → on-prem models</td><td>Sanitised prompts</td><td>Backend reachable only through the gateway — <em>not yet true (SL-10)</em></td></tr>
+          <tr><td>Gateway → Secrets Manager / S3</td><td>Signing material, the audit trail</td><td>The web tier cannot rewrite or erase its own history — <em>not yet true (SL-11)</em></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="flows">
+    <h2>Request flows</h2>
+    <p class="lede">Control IDs in the diagrams (T1, I2, D1 …) match the catalog below.</p>
+    <div class="legend">
+      <span><span class="swatch sw-fixed"></span>Control added by the SL-01 – SL-04 fixes</span>
+      <span><span class="swatch sw-gap"></span>Open security loop</span>
+      <span><span class="swatch sw-stop"></span>Refusal returned to the caller</span>
+    </div>
+
+    <h3>Data plane — invoking an application</h3>
+    <figure class="diagram">
+      <div class="canvas">
+<pre class="mermaid">
+flowchart TD
+    REQ(["POST /gateway/{appId}/invoke&lt;br/&gt;X-API-Key or Authorization: Bearer"])
+    REQ --> T1{"T1 HTTPS?"}
+    T1 -- "no" --> X403["403 HTTPS_REQUIRED"]
+    T1 -- "yes" --> T2["T2 host filter · T5 1 MB body cap&lt;br/&gt;T3 security headers · T4 CORS allow-list"]
+    T2 --> T6{"T6 per-app rate limit"}
+    T6 -- "over limit" --> X429["429 RATE_LIMITED"]
+    T6 -- ok --> ACT{"App registered and active?"}
+    ACT -- no --> X401["401 UNAUTHORIZED"]
+    ACT -- yes --> KIND{"Credential type"}
+    KIND -- "ug_sts_ token" --> I2{"I2 HMAC signature · key generation&lt;br/&gt;expiry · jti denylist"}
+    KIND -- "ug_live_ key" --> I1{"I1 SHA-256 then&lt;br/&gt;constant-time compare"}
+    I2 -- fail --> X401
+    I1 -- fail --> X401
+    I2 -- ok --> Z34{"Z3 token appId matches route&lt;br/&gt;Z4 scope permits invoke"}
+    Z34 -- no --> X401
+    Z34 -- yes --> D4
+    I1 -- ok --> D4{"D4 input within size limit&lt;br/&gt;max_tokens clamped to ceiling"}
+    D4 -- "too large" --> X413["413 INPUT_TOO_LARGE"]
+    D4 -- ok --> D1{"D1 ingress guardrail&lt;br/&gt;D3 250 ms timeout counts as a violation"}
+    D1 -- "Block mode and violation" --> X422["422 GUARDRAIL_BLOCKED"]
+    D1 -- "clean, redacted or audit-only" --> D5["D5 system prompt and model&lt;br/&gt;taken from the registry"]
+    D5 --> PROV{"Provider"}
+    PROV -- bedrock --> BR["Bedrock · SigV4 with&lt;br/&gt;Roles Anywhere credentials"]
+    PROV -- local --> LLM["On-prem model&lt;br/&gt;retry and circuit breaker"]
+    BR -. "failure" .-> FB["Fallback provider, if configured&lt;br/&gt;else D6 502 or 504 with a reference id"]
+    LLM -. "failure" .-> FB
+    BR --> D2
+    LLM --> D2
+    FB --> D2{"D2 egress guardrail&lt;br/&gt;scanner error suppresses output"}
+    D2 -- "Block mode and leak" --> X422B["422 OUTPUT_GUARDRAIL_BLOCKED"]
+    D2 -- ok --> A1["A1 audit record&lt;br/&gt;actor · auth type · jti · IP · traceId · tokens · cost"]
+    A1 --> DONE(["200 with sanitised output"])
+
+    G5["SL-05 bucket keyed on whatever&lt;br/&gt;string the caller presents"]:::gap -.- T6
+    G6["SL-06 rotating the app key leaves&lt;br/&gt;issued tokens valid"]:::gap -.- I2
+    G8["SL-08 trivial regex evasion ·&lt;br/&gt;system prompt never scanned"]:::gap -.- D1
+    G9["SL-09 unknown provider or implicit&lt;br/&gt;fallback is sent to Bedrock"]:::gap -.- PROV
+    G10["SL-10 backend reachable directly,&lt;br/&gt;no auth, plain HTTP"]:::gap -.- LLM
+
+    classDef gap fill:#fde2e1,stroke:#c0392b,color:#7b1d15
+    classDef fixed fill:#dff1e6,stroke:#2c6449,color:#173d2a
+    classDef stop fill:#eeeeee,stroke:#888888,color:#333333
+    class T1 fixed
+    class X403,X429,X401,X413,X422,X422B stop
+</pre>
+      </div>
+      <figcaption>The universal endpoint follows the same path from D4, but accepts only the master key or an admin-scoped admin token (Z5); every use is logged as a break-glass event.</figcaption>
+    </figure>
+
+    <h3>Management plane — authentication and authorization</h3>
+    <figure class="diagram">
+      <div class="canvas">
+<pre class="mermaid">
+flowchart TD
+    M(["Request to /api/*"]) --> RLM{"T6 management rate limit"}
+    RLM -- ok --> SIG{"Aws mode and&lt;br/&gt;X-Gateway-Aws-Identity present?"}
+    SIG -- yes --> VER{"I6 signed GetCallerIdentity:&lt;br/&gt;POST · allow-listed STS host · exact body&lt;br/&gt;server id signed · fresh"}
+    VER -- "malformed or stale" --> R401["401"]
+    VER -- ok --> STSV{"AWS STS verifies the signature&lt;br/&gt;account allow-listed · not root"}
+    STSV -- rejected --> R401
+    STSV -- verified --> P0["principal = role ARN reported by STS"]
+    SIG -- no --> FWD{"Bearer value shaped like a JWT?"}
+    FWD -- yes --> OKTA{"I3 Okta JWT: issuer, audience,&lt;br/&gt;lifetime, RS256 only"}
+    OKTA -- invalid --> R401
+    OKTA -- valid --> GRP{"Directory group mapped&lt;br/&gt;to a gateway role?"}
+    GRP -- no --> NOROLE["Authenticated with no role"]
+    GRP -- yes --> P1["principal = mapped role ARN"]
+    FWD -- no --> STK{"ug_sts_ token?"}
+    STK -- yes --> ADM{"Valid, isAdmin&lt;br/&gt;and admin scope?"}
+    ADM -- no --> R401
+    ADM -- yes --> BG["principal = configured&lt;br/&gt;BreakGlassPrincipalArn · warning logged"]
+    STK -- no --> MK{"I4 matches the master key&lt;br/&gt;held in Secrets Manager?"}
+    MK -- yes --> BG
+    MK -- no --> SIM{"Simulator provider?&lt;br/&gt;Development only"}
+    SIM -- "yes: session key or role name" --> P5["principal = session role"]
+    SIM -- no --> R401
+    P0 --> AL
+    P1 --> AL
+    BG --> AL
+    P5 --> AL
+    AL{"Z2 principal listed in&lt;br/&gt;AdminRoleArns?"} -- yes --> ALLOW
+    AL -- no --> EN{"AccessControl enabled?"}
+    EN -- no --> ALLOW
+    EN -- yes --> POL{"Policy: explicit Deny, then Allow,&lt;br/&gt;else implicit deny · engine errors deny"}
+    POL -- deny --> R403["403"]
+    POL -- allow --> ALLOW["Handler runs · A2 audit record&lt;br/&gt;principal · auth type · token id"]
+    NOROLE --> R403
+
+    G12["SL-12 access control off makes&lt;br/&gt;every authenticated caller admin"]:::gap -.- EN
+
+    classDef gap fill:#fde2e1,stroke:#c0392b,color:#7b1d15
+    classDef fixed fill:#dff1e6,stroke:#2c6449,color:#173d2a
+    class VER,STSV,BG,SIM fixed
+</pre>
+      </div>
+      <figcaption>Every branch that ends in a principal outside Development is a cryptographic proof: STS, an Okta RS256 signature, the gateway's own HMAC, or a constant-time key comparison.</figcaption>
+    </figure>
+
+    <h3>Credential lifecycle — host identity, keys and tokens</h3>
+    <figure class="diagram">
+      <div class="canvas">
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant Host as Gateway host (IIS)
+    participant RA as IAM Roles Anywhere
+    participant SM as Secrets Manager and KMS
+    participant Op as Operator (Okta)
+    participant App as Client application
+
+    Host->>RA: CreateSession signed with the X.509 key in the machine store
+    RA-->>Host: Temporary AWS credentials, 15 to 60 minutes
+    Note over Host: Refreshed 5 minutes before expiry. No access key on disk.
+    Host->>SM: Read signing key and admin key (cached 300 s)
+    opt First start
+        Host->>SM: Create 256-bit signing key at generation 1, and the admin key
+    end
+    Op->>Host: POST /api/apps with an Okta JWT (IAM action CreateApplication)
+    Host-->>Op: ug_live_ key, shown once. Only its SHA-256 hash is stored.
+    App->>Host: POST /gateway/sts/token with the ug_live_ key
+    Note over Host: Issuance audited with jti, key prefix and source IP
+    Host-->>App: ug_sts_ token. HMAC-SHA256, 15 min default, 1 h ceiling, scope, generation
+    App->>Host: POST /gateway/{appId}/invoke with Bearer ug_sts_
+    Host-->>App: Model response after both guardrails
+    Op->>Host: POST /api/apps/{appId}/rotate-key
+    Host-->>Op: New key. The old key stops working. Tokens already issued stay valid (SL-06).
+    Op->>Host: POST /api/credentials/rotate-signing-key
+    Host->>SM: Write generation N+1
+    Note over Host,App: Every earlier token now fails its signature check
+</pre>
+      </div>
+    </figure>
+
+    <h3>The critical chain, and where it now stops</h3>
+    <figure class="diagram">
+      <div class="canvas">
+<pre class="mermaid">
+flowchart LR
+    A["Caller on the network"] --> B["X-API-Key:&lt;br/&gt;arn:aws:iam::ACCOUNT:role/GatewayPlatformAdminRole"]
+    B --> C{"Plain HTTP?"}
+    C -- yes --> X1["403 HTTPS_REQUIRED&lt;br/&gt;SL-03 fixed"]
+    C -- no --> D["Not an STS token, not the master key,&lt;br/&gt;no signed identity"]
+    D --> X2["401 Unrecognised credential&lt;br/&gt;SL-01 fixed"]
+    A -. "signs in to a leftover Okta simulator" .-> X3["Simulator refused at startup&lt;br/&gt;and not mapped · SL-02 fixed"]
+    A -. "replays a break-glass token scoped read" .-> X4["401 scope does not permit&lt;br/&gt;management · SL-04 fixed"]
+
+    classDef blocked fill:#dff1e6,stroke:#2c6449,color:#173d2a
+    class X1,X2,X3,X4 blocked
+</pre>
+      </div>
+      <figcaption>Before the fixes, every step succeeded: anyone who could reach the port held the management plane in Production and Test, over plain HTTP.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="controls">
+    <h2>Security controls, and why each is needed</h2>
+    <p class="lede"><span class="chip c-closed">Implemented</span> present and correct as far as review and tests show · <span class="chip c-partial">Partial</span> present, with an open loop listed below.</p>
+
+    <h3>Transport and edge</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Control</th><th>Why it is needed</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="id">T1</td><td>HTTPS-only IIS binding; API calls over HTTP refused with <code>HTTPS_REQUIRED</code>, not redirected; HSTS one year; browsers redirected with 308.<span class="where"><a href="../deploy/iis/install.ps1#L84-L114">install.ps1</a> · <a href="../Startup/HttpsEnforcementMiddleware.cs">HttpsEnforcementMiddleware.cs</a> · <a href="../Program.cs#L376-L402">Program.cs</a></span></td><td>Keys and tokens are bearer secrets and prompts carry PCI/PII. A redirect is too late for an API call: the key has already crossed the network.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">T2</td><td>Host filtering<span class="where"><a href="../appsettings.Production.json#L10">appsettings.Production.json</a></span></td><td>Blocks host-header manipulation and DNS rebinding.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">T3</td><td>Security headers and CSP (<code>script-src 'self'</code>, <code>frame-ancestors 'none'</code>, <code>nosniff</code>)<span class="where"><a href="../Program.cs">Program.cs</a></span></td><td>The dashboard holds an operator's Okta token; the CSP contains injected script.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">T4</td><td>CORS allow-list, no wildcard branch<span class="where"><a href="../Program.cs">Program.cs</a></span></td><td>Stops arbitrary pages scripting the API from a staff browser.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">T5</td><td>1 MB request body cap on Kestrel and IIS<span class="where"><a href="../Program.cs">Program.cs</a></span></td><td>Bounds memory per request before parsing.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">T6</td><td>Rate limits: global floor plus per-app, token-issuance, management<span class="where"><a href="../Program.cs#L306-L314">Program.cs</a></span></td><td>Bounds brute force, cost exhaustion and denial of service.</td><td><span class="chip c-partial">Partial · SL-05</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Identity and authentication</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Control</th><th>Why it is needed</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="id">I1</td><td>App API keys: 256-bit CSPRNG, SHA-256 stored, constant-time compare, shown once<span class="where"><a href="../Services/SecurityService.cs#L45-L80">SecurityService.cs</a></span></td><td>A copied registry yields no usable keys; timing leaks nothing.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">I2</td><td>App STS tokens: HMAC-SHA256, key in Secrets Manager, 15 min default / 1 h ceiling, generation and <code>jti</code><span class="where"><a href="../Services/SecurityService.cs">SecurityService.cs</a></span></td><td>Long-term keys stay on the caller; a leaked token expires on its own.</td><td><span class="chip c-partial">Partial · SL-06</span></td></tr>
+          <tr><td class="id">I3</td><td>Okta OIDC for operators: issuer, audience, lifetime, RS256 pinned, group → role. Simulator Development-only.<span class="where"><a href="../Auth/OktaAuthentication.cs#L74">OktaAuthentication.cs</a> · <a href="../Startup/StartupValidator.cs#L321">StartupValidator.cs</a></span></td><td>People authenticate as people with corporate MFA and offboarding; algorithm pinning defeats forgery.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">I4</td><td>Break-glass: master key in Secrets Manager, acting as the configured <code>BreakGlassPrincipalArn</code>, every use logged <code>BREAK-GLASS</code><span class="where"><a href="../Services/Cloud/AdminCredentialService.cs#L64-L79">AdminCredentialService.cs</a> · <a href="../Auth/GatewayAuthentication.cs#L209-L224">GatewayAuthentication.cs</a></span></td><td>Recovery when the identity provider is down — attributable and alertable.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">I5</td><td>Host AWS identity through IAM Roles Anywhere (X.509), no stored access key<span class="where"><a href="../Services/Aws/RolesAnywhereCredentialProvider.cs">RolesAnywhereCredentialProvider.cs</a></span></td><td>IIS has no instance role; a stored access key is the credential most often leaked.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">I6</td><td>Automation identity: SigV4-signed <code>sts:GetCallerIdentity</code> relayed to STS; only the ARN STS returns is trusted<span class="where"><a href="../Services/Cloud/Aws/AwsIdentityProvider.cs#L69-L162">AwsIdentityProvider.cs</a> · <a href="../Auth/GatewayAuthentication.cs#L97-L152">GatewayAuthentication.cs</a> · <a href="aws-iam-authentication.md">client guide</a></span></td><td>IAM principals reach the management API with no gateway secret, and AWS — not the caller — vouches for who they are.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Authorization</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Control</th><th>Why it is needed</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="id">Z1</td><td>Deny-by-default on the whole <code>/api</code> group<span class="where"><a href="../Endpoints/DashboardEndpoints.cs#L72-L75">DashboardEndpoints.cs</a></span></td><td>A new endpoint cannot ship unguarded.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">Z2</td><td>Per-action IAM policy: explicit Deny, then Allow, else implicit deny; engine errors deny<span class="where"><a href="../Auth/GatewayAuthentication.cs">GatewayAuthentication.cs</a> · <a href="../Services/Cloud/Aws/AwsProviders.cs#L195-L346">AwsProviders.cs</a></span></td><td>Least privilege: Auditor reads, AppOwner creates, only PlatformAdmin changes guardrails.</td><td><span class="chip c-partial">Partial · SL-12</span></td></tr>
+          <tr><td class="id">Z3</td><td>App isolation: token <code>appId</code> must match the route; master key is not an app credential<span class="where"><a href="../Services/ApplicationRegistryService.cs#L382-L415">ApplicationRegistryService.cs</a></span></td><td>One tenant cannot invoke another's app, prompt or budget.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">Z4</td><td>Scope enforcement: <code>read</code> cannot invoke; only <code>admin</code> can manage<span class="where"><a href="../Services/ApplicationRegistryService.cs#L391-L397">ApplicationRegistryService.cs</a> · <a href="../Auth/GatewayAuthentication.cs#L171">GatewayAuthentication.cs</a></span></td><td>An advertised restriction must be enforced.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">Z5</td><td>Universal endpoint limited to admins<span class="where"><a href="../Endpoints/GatewayEndpoints.cs">GatewayEndpoints.cs</a></span></td><td>Choosing model, provider and system prompt is privileged.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Data protection (guardrails)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Control</th><th>Why it is needed</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="id">D1</td><td>Ingress guardrail: cards (Luhn), IBAN, CVV, SSN, email, phone, passport, AWS keys, private keys, JWTs, API tokens, prompt injection; Redact / Block / AuditOnly<span class="where"><a href="../Services/GuardrailService.cs#L40-L131">GuardrailService.cs</a></span></td><td>Keeps regulated data from a third-party model and its logs.</td><td><span class="chip c-partial">Partial · SL-07, SL-08</span></td></tr>
+          <tr><td class="id">D2</td><td>Egress guardrail; a scanner error withholds the output<span class="where"><a href="../Services/ModelRouter.cs#L334-L394">ModelRouter.cs</a></span></td><td>Models echo input and can leak system-prompt secrets.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">D3</td><td>250 ms timeout per pattern; a timeout is a violation<span class="where"><a href="../Services/GuardrailService.cs#L241-L270">GuardrailService.cs</a></span></td><td>Stops ReDoS; an unfinished scan is not a pass.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">D4</td><td>Input size limit and <code>max_tokens</code> ceiling<span class="where"><a href="../Services/ModelRouter.cs#L105-L139">ModelRouter.cs</a></span></td><td>Bounds scan cost and per-request spend.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">D5</td><td>System prompt and model from the registry on the app path<span class="where"><a href="../Services/ModelRouter.cs#L67-L82">ModelRouter.cs</a></span></td><td>A caller cannot replace the application's instructions.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">D6</td><td>Backend errors replaced with a stable code and reference id<span class="where"><a href="../Services/ModelRouter.cs#L194-L215">ModelRouter.cs</a></span></td><td>Internal hosts and ARNs stay in server logs.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Secrets, audit and configuration</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Control</th><th>Why it is needed</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="id">K1</td><td>Signing and admin keys in Secrets Manager under KMS; config-sourced admin key refused outside Development<span class="where"><a href="../Services/Cloud/SigningKeyProvider.cs">SigningKeyProvider.cs</a></span></td><td>A copied config file or backup yields no key material.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">K2</td><td>Signing-key rotation invalidates every token<span class="where"><a href="../Endpoints/DashboardEndpoints.cs#L222-L242">DashboardEndpoints.cs</a></span></td><td>Fleet-wide incident response.</td><td><span class="chip c-partial">Partial · SL-06</span></td></tr>
+          <tr><td class="id">K3</td><td>Per-application key rotation<span class="where"><a href="../Endpoints/DashboardEndpoints.cs#L161-L186">DashboardEndpoints.cs</a></span></td><td>Response to one leaked key.</td><td><span class="chip c-partial">Partial · SL-06</span></td></tr>
+          <tr><td class="id">K4</td><td>Admin tokens capped at 15 minutes; <code>callerId</code> held to a safe charset<span class="where"><a href="../Services/SecurityService.cs#L357">SecurityService.cs</a> · <a href="../Services/ApplicationRegistryService.cs#L442">ApplicationRegistryService.cs</a></span></td><td>Each admin token is break-glass in bearer form; <code>callerId</code> reaches logs and the dashboard.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">A1</td><td>Invocation record with actor, auth type, <code>jti</code>, IP, traceId, tokens, cost; <code>callerId</code> kept as a label, never the identity<span class="where"><a href="../Services/ModelRouter.cs#L405-L446">ModelRouter.cs</a> · <a href="../Models/CallerContext.cs">CallerContext.cs</a></span></td><td>Non-repudiation, chargeback, forensics.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">A2</td><td>A record for every privileged action and every token issuance, break-glass mints included, with the token id<span class="where"><a href="../Endpoints/DashboardEndpoints.cs#L14-L26">DashboardEndpoints.cs</a> · <a href="../Services/ApplicationRegistryService.cs#L478">ApplicationRegistryService.cs</a></span></td><td>Privileged changes and credential issuance must name an actor and source.</td><td><span class="chip c-partial">Partial · SL-07</span></td></tr>
+          <tr><td class="id">A3</td><td>Durable, date-partitioned audit store in S3<span class="where"><a href="../Services/Telemetry/S3AuditStore.cs">S3AuditStore.cs</a></span></td><td>The trail survives loss of the host.</td><td><span class="chip c-partial">Partial · SL-11</span></td></tr>
+          <tr><td class="id">S1</td><td><code>StartupValidator</code> refuses insecure config outside Development: default keys, auth off, wildcard CORS, HTTP, long TTLs, either simulator, the Okta simulator, placeholders, no break-glass principal, loosely scoped AWS identity<span class="where"><a href="../Startup/StartupValidator.cs">StartupValidator.cs</a></span></td><td>A misconfiguration fails the deploy instead of running quietly insecure.</td><td><span class="chip c-partial">Partial · SL-12</span></td></tr>
+          <tr><td class="id">S2</td><td>Swagger in Development only<span class="where"><a href="../Program.cs">Program.cs</a></span></td><td>No free map of the management surface.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">S3</td><td><code>NuGetAudit</code>, locked restore, CodeQL, gitleaks<span class="where"><a href="../.github/workflows/ci.yml">ci.yml</a></span></td><td>Vulnerable dependencies and committed secrets fail the PR.</td><td><span class="chip c-closed">Implemented</span></td></tr>
+          <tr><td class="id">S4</td><td>Retry, circuit breaker and fallback on providers<span class="where"><a href="../Program.cs#L167-L191">Program.cs</a> · <a href="../Services/ModelRouter.cs#L228-L294">ModelRouter.cs</a></span></td><td>Availability for every tenant.</td><td><span class="chip c-partial">Partial · SL-09, SL-17</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="loops">
+    <h2>Security loops</h2>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Loop</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="id"><span class="sev sev-crit"></span>SL-01</td><td>AWS mode accepted any ARN string as an authenticated identity</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-high"></span>SL-02</td><td>Okta simulator with a hard-coded admin was on unless switched off</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-high"></span>SL-03</td><td>Mandatory TLS was not enforced as deployed</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-high"></span>SL-04</td><td>Admin STS tokens skipped scope, chose their own identity, and were minted unaudited</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-05</td><td>Rate limits are keyed on a value the caller chooses</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-06</td><td>Revocation cannot target one application or one token</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-07</td><td>Guardrail weakening is not fully audited or persisted</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-08</td><td>Guardrails are evadable pattern filters and skip the system prompt</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-09</td><td>Routing fails open to the cloud</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-10</td><td>On-prem model servers can be called around the gateway</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-11</td><td>The audit trail can be erased by the principal it audits</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-12</td><td>Disabling access control passes startup validation</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-13</td><td>Unauthenticated metadata endpoints</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-14</td><td>Registry and system prompts are plaintext on the web host</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-15</td><td>Documentation contradicts the code</td><td><span class="chip c-partial">Partly reconciled</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-16</td><td>Development profile is an open admin plane with real Bedrock spend</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-17</td><td>One circuit breaker shared by every local backend</td><td><span class="chip c-open">Open</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Fixed</h3>
+    <div class="items">
+
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-01 · CRITICAL</span>
+          <p class="i-title">AWS mode accepted any ARN string as an authenticated identity</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../Services/Cloud/Aws/AwsIdentityProvider.cs#L254">AwsIdentityProvider.cs</a> · <a href="../Auth/GatewayAuthentication.cs#L97-L152">GatewayAuthentication.cs</a> · <a href="../Program.cs#L133">Program.cs</a> · <a href="aws-iam-authentication.md">aws-iam-authentication.md</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd>The handler passed whatever arrived in <code>X-API-Key</code>, <code>Authorization</code> or <code>X-Simulator-Role</code> to <code>AwsIdentityProvider</code>, which returned <em>authenticated</em> for any string beginning <code>arn:aws:</code> and used it as the principal. Role ARNs ship in the deployed config, so <strong>anyone who could reach the port held the management plane</strong> in Production and Test.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Identity in AWS mode is proven, not asserted.
+            <ul>
+              <li>Automation sends a SigV4-signed <code>sts:GetCallerIdentity</code> request in <code>X-Gateway-Aws-Identity</code>; its AWS secret never reaches the gateway.</li>
+              <li>Before contacting AWS the gateway requires a POST to an allow-listed STS host with no port, path or query; exactly <code>Action=GetCallerIdentity&amp;Version=2011-06-15</code>; a signed <code>X-Gateway-Server-Id</code> equal to this gateway's (no replay from other services); and an <code>X-Amz-Date</code> within five minutes. Only signed headers are relayed; redirects are off.</li>
+              <li>STS verifies the signature. The answer is parsed with DTDs prohibited; the account must be allow-listed; assumed roles map to their role ARN; root and federated users are refused.</li>
+              <li>A bare ARN in any header gets 401. <code>X-Simulator-Role</code> is read only under a simulator. Off by default; when enabled, startup refuses loose scoping.</li>
+            </ul></dd></div>
+          <div class="i-row"><dt>Proof</dt><dd>25 cases in <code>SecurityLoopTests</code>: asserted ARNs rejected in three headers; nine malformed requests refused without contacting AWS; wrong or unsigned server id, stale date, foreign account, STS rejection, root, federated user and DTD payload all refused; a valid request authenticates as the role and relays only signed headers. <strong>Not yet run against a real AWS account.</strong></dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-02 · HIGH</span>
+          <p class="i-title">Okta simulator with a hard-coded admin was on unless switched off</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../appsettings.json#L183">appsettings.json</a> · <a href="../Startup/StartupValidator.cs#L321">StartupValidator.cs</a> · <a href="../Program.cs#L467">Program.cs</a> · <a href="../Auth/OktaAuthentication.cs#L74">OktaAuthentication.cs</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd>The base config enabled the simulator, so Staging, UAT, DR or a mistyped environment name inherited a password-grant endpoint that issued trusted admin tokens for an account whose password is in source, plus an unauthenticated directory of users and role ARNs.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Defaults to off; the base file is now a template with <code>&lt;your-tenant&gt;</code> and <code>&lt;account-id&gt;</code> placeholders, and only Development switches the simulator on. Startup refuses it elsewhere and requires HTTPS, substituted issuer and metadata URLs and real role ARNs for the tenant — so an unconfigured environment refuses to boot. Endpoints are mapped, and the in-process key trusted, only in Development.</dd></div>
+          <div class="i-row"><dt>Proof</dt><dd>Refused in Test, Staging and Production; HTTP and placeholder issuers refused; placeholder role mappings refused; no shipped environment but Development runs it; Staging, which has no file, refuses to start.</dd></div>
+          <div class="i-row"><dt>Residual</dt><dd>The demo users are still compiled into <code>OktaDirectory.cs</code>. They are unreachable outside Development, but moving them to a Development-only file would keep them out of production binaries.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-03 · HIGH</span>
+          <p class="i-title">Mandatory TLS was not enforced as deployed</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../deploy/iis/install.ps1#L84-L114">install.ps1</a> · <a href="../Startup/HttpsEnforcementMiddleware.cs">HttpsEnforcementMiddleware.cs</a> · <a href="../Program.cs#L376-L402">Program.cs</a> · <a href="../Startup/StartupValidator.cs#L60-L80">StartupValidator.cs</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd>The installer created one HTTP binding on port 8080, so redirection had nowhere to go and HSTS never applied: keys, tokens and prompts travelled in clear. Test was treated as loopback and exempted from HTTPS and from app authentication, although it binds real AWS on a network host.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd><ul>
+            <li><strong>Installer:</strong> requires <code>-CertificateThumbprint</code>; checks the certificate exists with its private key, is unexpired, carries the server-auth EKU and covers <code>-HostName</code>; creates an HTTPS (SNI) binding, attaches the certificate and <strong>removes every HTTP binding</strong>. <code>-AllowHttpRedirect</code> and <code>-DisableLegacyTls</code> are opt-in; the script warns while TLS 1.0/1.1 remain enabled.</li>
+            <li><strong>Application:</strong> <code>/gateway</code>, <code>/api</code> and <code>/okta</code> over HTTP get <code>403 HTTPS_REQUIRED</code> — no redirect, because the key has already crossed the network and a followed redirect hides the misconfiguration. Browsers get a 308; HSTS lasts a year.</li>
+            <li><strong>Validation:</strong> only Development may disable HTTPS or app authentication; Test now requires HTTPS; the role-name simulator is refused outside Development.</li>
+          </ul></dd></div>
+          <div class="i-row"><dt>Proof</dt><dd>HTTP refused in Test and Staging; authentication cannot be disabled in Test; simulator refused outside Development; four API paths get 403 over HTTP; HTTPS and non-API paths pass. The installer passes the PowerShell parser but <strong>has not been run on an IIS host</strong>. Health probes must now use HTTPS.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-04 · HIGH</span>
+          <p class="i-title">Admin STS tokens skipped scope, chose their own identity, and were minted unaudited</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../Auth/GatewayAuthentication.cs#L155-L224">GatewayAuthentication.cs</a> · <a href="../Services/ApplicationRegistryService.cs#L478">ApplicationRegistryService.cs</a> · <a href="../Services/SecurityService.cs#L357">SecurityService.cs</a> · <a href="../Startup/StartupValidator.cs#L122">StartupValidator.cs</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd>Minting an admin token with the master key wrote no audit record and no warning. On <code>/api</code> any admin token passed whatever its scope. Its principal was the first admin ARN — skipping IAM, explicit Deny included — or a role named by the token's self-chosen <code>callerId</code>; with no admin ARNs, break-glass mapped to the placeholder account <code>123456789012</code>.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd><ul>
+            <li><strong>Scope:</strong> <code>/api</code> requires the <code>admin</code> scope.</li>
+            <li><strong>Identity:</strong> master key and admin tokens act as the configured <code>BreakGlassPrincipalArn</code>; unset means refused, and startup requires it outside Development. The token's <code>jti</code> travels into the management audit record.</li>
+            <li><strong>Audit and alerting:</strong> every issuance is recorded with token id, scope, lifetime, <code>callerId</code> and source IP (<code>MintAdminStsToken</code>, <code>ExchangeApiKeyForStsToken</code>); break-glass mints and uses log <code>BREAK-GLASS:</code> at Warning for the SIEM.</li>
+            <li><strong>Lifetime and attribution:</strong> admin tokens capped at 15 minutes; <code>callerId</code> limited to a safe charset and recorded only as a label beside a server-derived identity.</li>
+          </ul></dd></div>
+          <div class="i-row"><dt>Proof</dt><dd><code>read</code>- and <code>invoke</code>-scoped admin tokens cannot manage; an admin token acts as the break-glass ARN whatever its <code>callerId</code>; so does the master key; break-glass fails closed without a principal and startup requires one; a mint is audited with token id and source IP; admin tokens are capped at 900 s; control characters and markup in <code>callerId</code> are rejected; data-plane attribution reads <code>break-glass [label]</code>.</dd></div>
+        </dl>
+      </article>
+    </div>
+
+    <h3>Open</h3>
+    <div class="items">
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-05 · MEDIUM</span><p class="i-title">Rate limits are keyed on a value the caller chooses</p>
+          <div class="i-loc"><a href="../Program.cs#L306-L314">Program.cs:306</a> · <a href="../Program.cs#L483-L503">Program.cs:483</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>The partition is a hash of whatever credential string is presented, before authentication, and the global floor uses the same function. A fresh random string per request is a fresh bucket, so unauthenticated calls to the token endpoint and <code>/api</code> are unlimited. No forwarded-headers handling: behind a balancer, IP fallback and audit <code>SourceIp</code> would record the balancer.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Partition unauthenticated and failed requests by client IP; switch to the credential only after authentication succeeds; add a per-IP failed-auth counter with backoff; configure <code>UseForwardedHeaders</code> before adding a balancer.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-06 · MEDIUM</span><p class="i-title">Revocation cannot target one application or one token</p>
+          <div class="i-loc"><a href="../Services/SecurityService.cs#L313-L322">SecurityService.cs:313</a> · <a href="../Services/ApplicationRegistryService.cs#L326-L346">ApplicationRegistryService.cs:326</a> · <a href="../Services/Cloud/SigningKeyProvider.cs#L72-L76">SigningKeyProvider.cs:72</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>Rotating an app key leaves its issued tokens valid for up to an hour. The <code>jti</code> denylist has no caller outside tests and is per node. Signing-key rotation reaches other nodes only after their 300 s cache.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>A per-app key generation stamped into tokens and checked on validation; <code>POST /api/tokens/revoke</code> behind an IAM action with a persisted denylist; re-read the signing key on an unknown generation. The token id now in every issuance record is the handle a revocation would name.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-07 · MEDIUM</span><p class="i-title">Guardrail weakening is not fully audited or persisted</p>
+          <div class="i-loc"><a href="../Endpoints/DashboardEndpoints.cs#L426-L434">DashboardEndpoints.cs:426</a> · <a href="../Services/GuardrailService.cs#L30-L38">GuardrailService.cs:30</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>The audit records only <code>enabled</code> and <code>mode</code>. Switching off PII, PCI, injection or output scanning reads <code>enabled True → True; mode Redact → Redact</code>. The change is in memory: it reverts on restart and applies only to one node.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Record the full before/after; alert when any detector turns off or the mode leaves Block/Redact; persist the policy, versioned, in Secrets Manager or Parameter Store.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-08 · MEDIUM</span><p class="i-title">Guardrails are evadable pattern filters and skip the system prompt</p>
+          <div class="i-loc"><a href="../Services/GuardrailService.cs#L40-L67">GuardrailService.cs:40</a> · <a href="../Services/GuardrailService.cs#L604">GuardrailService.cs:604</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>Run against the shipped patterns: <code>ignore all previous instructions</code> is caught; <code>ignore the previous instructions</code> and <code>ignore previous instruction</code> are not. <code>4111 1111 1111 1111</code> is caught; <code>4111.1111.1111.1111</code> is not. <code>123-45-6789</code> is caught; <code>123.45.6789</code> is not. The <code>systemPrompt</code> argument is never scanned, and Bedrock Guardrails is configured but unused.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Normalise (NFKC, strip zero-width, collapse separators in digit runs) before scanning; scan the system field; wire up Bedrock Guardrails or a classifier. Until then treat the guardrail as best-effort DLP.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-09 · MEDIUM</span><p class="i-title">Routing fails open to the cloud</p>
+          <div class="i-loc"><a href="../Services/ModelRouter.cs#L228-L236">ModelRouter.cs:228</a> · <a href="../Services/ModelRouter.cs#L301-L328">ModelRouter.cs:301</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>An unknown provider or model goes to Bedrock; an app with a fallback model but no fallback provider falls back to the opposite host, so a local app falls back to the cloud. Neither field is validated.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Allow-list providers; make unknowns an error; require an explicit fallback provider; add a per-app <code>OnPremOnly</code> residency flag.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-10 · MEDIUM</span><p class="i-title">On-prem model servers can be called around the gateway</p>
+          <div class="i-loc"><a href="../appsettings.Production.json#L43">appsettings.Production.json:43</a> · <a href="../Services/LocalModelService.cs#L112-L133">LocalModelService.cs:112</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>Ollama, LM Studio and llama.cpp have no authentication and are reached over plain HTTP on the network, so anyone who can route to them skips keys, guardrails, audit and billing.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Loopback or firewall to the gateway host only; a TLS reverse proxy with mTLS or a bearer secret in front.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-11 · MEDIUM</span><p class="i-title">The audit trail can be erased by the principal it audits</p>
+          <div class="i-loc"><a href="../Services/Telemetry/S3AuditStore.cs#L256-L294">S3AuditStore.cs:256</a> · <a href="../Services/Telemetry/AuditFlushService.cs#L79-L84">AuditFlushService.cs:79</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>The gateway prunes by deleting S3 objects, so its role can delete its own history. Records wait in memory up to 30 s; failed flushes re-queue without bound; objects are not chained.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>S3 Object Lock (compliance mode) with lifecycle retention; drop <code>s3:DeleteObject</code> from the role; bound the buffer; ship to the SIEM — where the new <code>BREAK-GLASS:</code> warnings should alert.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-medium">
+        <div class="i-head"><span class="i-id">SL-12 · MEDIUM</span><p class="i-title">Disabling access control passes startup validation</p>
+          <div class="i-loc"><a href="../Auth/GatewayAuthentication.cs#L320-L335">GatewayAuthentication.cs:320</a> · <a href="../Startup/StartupValidator.cs#L115-L120">StartupValidator.cs:115</a></div></div>
+        <dl class="i-body">
+          <div class="i-row"><dt>What</dt><dd>With <code>AccessControl:Enabled: false</code> every authenticated principal is authorized; the validator refuses this only when no admin ARN is listed, so one ARN plus a disabled engine starts, and every Okta Developer is an admin. (The placeholder-account half was fixed under SL-04.)</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>Refuse <code>Enabled: false</code> outside Development outright.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-low">
+        <div class="i-head"><span class="i-id">SL-13 · LOW</span><p class="i-title">Unauthenticated metadata endpoints</p>
+          <div class="i-loc"><a href="../Endpoints/GatewayEndpoints.cs#L79-L101">GatewayEndpoints.cs:79</a> · <a href="../Program.cs#L472-L478">Program.cs:472</a></div></div>
+        <dl class="i-body"><div class="i-row"><dt>What</dt><dd><code>/gateway/sts/inspect</code> returns the claims of any validly signed token, expired or revoked included — an oracle for testing a stolen token outside the invoke audit. <code>/status</code> discloses the version. <strong>Fix:</strong> return only validity and expiry, or require authentication.</dd></div></dl>
+      </article>
+
+      <article class="item i-low">
+        <div class="i-head"><span class="i-id">SL-14 · LOW</span><p class="i-title">Registry and system prompts are plaintext on the web host</p>
+          <div class="i-loc"><a href="../Services/ApplicationRegistryService.cs#L719-L771">ApplicationRegistryService.cs:719</a></div></div>
+        <dl class="i-body"><div class="i-row"><dt>What</dt><dd>Plain JSON under the site root, with a <code>.bak</code> copy: key hashes, system prompts, rate cards, history. <strong>Fix:</strong> encrypt at rest through <code>ICryptoProvider</code> or move to a database; restrict the ACL.</dd></div></dl>
+      </article>
+
+      <article class="item i-low">
+        <div class="i-head"><span class="i-id">SL-15 · LOW</span><p class="i-title">Documentation contradicts the code</p>
+          <div class="i-loc"><a href="../architecture.md">architecture.md</a> · <a href="../README.md#L92-L106">README.md:92</a></div></div>
+        <dl class="i-body"><div class="i-row"><dt>What</dt><dd>The sign-off table and installer now match the code. <code>architecture.md</code> §1.1/§2 still describe Data Protection, a container sandbox, Kubernetes and TLS 1.3; the README still calls <code>/api</code> unauthenticated. <strong>Fix:</strong> reconcile, citing code per claim.</dd></div></dl>
+      </article>
+
+      <article class="item i-low">
+        <div class="i-head"><span class="i-id">SL-16 · LOW</span><p class="i-title">Development profile is an open admin plane with real Bedrock spend</p>
+          <div class="i-loc"><a href="../appsettings.Development.json#L120">appsettings.Development.json:120</a> · <a href="../Services/Cloud/LocalDotNet/LocalDotNetProviders.cs#L291-L319">LocalDotNetProviders.cs:291</a></div></div>
+        <dl class="i-body"><div class="i-row"><dt>What</dt><dd>IamLocal auto-creates any role with <code>Allow */*</code> while Bedrock calls reach real AWS; safe only while bound to localhost. <strong>Fix:</strong> refuse non-loopback URLs in Development.</dd></div></dl>
+      </article>
+
+      <article class="item i-low">
+        <div class="i-head"><span class="i-id">SL-17 · LOW</span><p class="i-title">One circuit breaker shared by every local backend</p>
+          <div class="i-loc"><a href="../Program.cs#L167-L191">Program.cs:167</a></div></div>
+        <dl class="i-body"><div class="i-row"><dt>What</dt><dd>One breaker for three backends, and generation POSTs are retried. <strong>Fix:</strong> a policy per client; no retry of generation on timeout.</dd></div></dl>
+      </article>
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="plan">
+    <h2>Remediation order</h2>
+    <div class="phases">
+      <div class="phase">
+        <div class="phase-tag"><span class="p-n">Done</span><span class="p-l">this change</span></div>
+        <div class="phase-body"><p><strong>SL-01 · SL-02 · SL-03 · SL-04.</strong> 68 new tests in <code>SecurityLoopTests</code> and <code>ShippedConfigurationTests</code>; 263 passing in total.</p></div>
+      </div>
+      <div class="phase">
+        <div class="phase-tag"><span class="p-n">Before production</span><span class="p-l">days</span></div>
+        <div class="phase-body"><p>Exercise the AWS identity path against a staging account — a signed request from a real role authenticates, a forged one is refused by STS — and run the installer on an IIS host to confirm the site answers only on HTTPS with the expected certificate.</p></div>
+      </div>
+      <div class="phase">
+        <div class="phase-tag"><span class="p-n">Next sprint</span><span class="p-l">2–4 weeks</span></div>
+        <div class="phase-body"><p><strong>SL-05 · SL-06 · SL-07 · SL-09 · SL-11 · SL-12.</strong> Proof: distinct random keys from one IP draw 429s; an old app token dies on key rotation; a detector change leaves a diff in the audit; an unknown provider is a 400; the gateway role has no <code>s3:DeleteObject</code>; disabled access control refuses to start.</p></div>
+      </div>
+      <div class="phase">
+        <div class="phase-tag"><span class="p-n">Planned</span><span class="p-l">ongoing</span></div>
+        <div class="phase-body"><p><strong>SL-08 · SL-10 · SL-13 – SL-17</strong>, then an external penetration test covering the management plane, alongside the items already open in <code>architecture.md</code>: per-app ownership, asymmetric KMS signing, a database registry, SIEM export and token budgets.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================================== -->
+  <section id="holds">
+    <h2>What holds up</h2>
+    <div class="added">
+      <div class="add"><span class="add-t">Key handling</span><span class="add-d">256-bit CSPRNG keys, stored only as SHA-256, compared in constant time, shown once.</span></div>
+      <div class="add"><span class="add-t">Token validation order</span><span class="add-d">Signature first, then generation, expiry and denylist; nothing parsed from an unverified payload.</span></div>
+      <div class="add"><span class="add-t">Fail-closed defaults</span><span class="add-d">Policy engine errors, guardrail timeouts, scanner errors, missing keys, unreachable STS and unconfigured break-glass all mean refusal.</span></div>
+      <div class="add"><span class="add-t">Proven identities</span><span class="add-d">Outside Development every accepted credential is a cryptographic proof: Okta RS256, the gateway's HMAC, a constant-time key compare, or AWS STS.</span></div>
+      <div class="add"><span class="add-t">Host credentials</span><span class="add-d">Roles Anywhere removes the stored AWS key; local profiles and placeholders refused outside Development.</span></div>
+      <div class="add"><span class="add-t">Dashboard</span><span class="add-d">Every server value escaped, no inline handlers, <code>script-src 'self'</code>, token in <code>sessionStorage</code>.</span></div>
+      <div class="add"><span class="add-t">Supply chain</span><span class="add-d">Locked restore, <code>NuGetAudit</code>, CodeQL and gitleaks on every pull request and weekly.</span></div>
+    </div>
+  </section>
+
+  <footer>
+    <p><strong>Scope and method.</strong> Static review of every C# source file, configuration file, dashboard asset, deployment script and the CI workflow on <code>main</code> at <code>57f9858</code>. The SL-08 results come from running the shipped patterns on the .NET regex engine. The SL-01 – SL-04 fixes are covered by unit tests driving the real authentication handler, identity provider, startup validator, registry and middleware, with only STS and the cloud stores replaced by in-memory doubles. The installer was checked with the PowerShell parser only. Nothing was tested against a running deployment, and the AWS provider path has never run against a real account.</p>
+    <p>Markdown source: <a href="security-architecture-flow.md">security-architecture-flow.md</a> · Client guide: <a href="aws-iam-authentication.md">aws-iam-authentication.md</a> · Line references are for the working tree as of this revision. Diagrams are rendered in the browser by Mermaid; offline, their source text is shown instead.</p>
+  </footer>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+  (function () {
+    if (typeof mermaid === 'undefined') return;
+    var root = document.documentElement;
+    var theme = root.getAttribute('data-theme');
+    var dark = theme === 'dark' ||
+      (theme !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: dark ? 'dark' : 'neutral',
+      securityLevel: 'strict',
+      fontFamily: '"IBM Plex Sans", -apple-system, "Segoe UI", sans-serif'
+    });
+  })();
+</script>
+</body>
+</html>

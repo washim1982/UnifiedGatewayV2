@@ -45,7 +45,7 @@ var oktaOptions = builder.Configuration
     .Get<OktaOptions>() ?? new OktaOptions();
 
 // Refuse to start on an insecure configuration rather than starting insecure.
-StartupValidator.Validate(gatewayOptions, cloudOptions, builder.Environment);
+StartupValidator.Validate(gatewayOptions, cloudOptions, builder.Environment, oktaOptions);
 
 // ---------------------------------------------------------------------------
 // 2. Cloud provider binding — the single switch between TEST and PROD
@@ -126,6 +126,19 @@ switch (cloudOptions.Provider)
 
 builder.Services.AddSingleton<ISigningKeyProvider, SigningKeyProvider>();
 builder.Services.AddSingleton<IAdminCredentialService, AdminCredentialService>();
+
+// Machine identity for the management plane in AWS mode: a caller's signed
+// sts:GetCallerIdentity request is relayed to STS. Redirects are off, so the request reaches
+// the allow-listed STS host or nothing.
+builder.Services.AddHttpClient(AwsIdentityProvider.HttpClientName, c =>
+    {
+        c.Timeout = TimeSpan.FromSeconds(Math.Clamp(cloudOptions.AwsIdentity.TimeoutSeconds, 1, 30));
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        UseCookies = false
+    });
 
 // Bedrock Runtime. Resolved from EffectiveBedrockProvider, not Provider: Development binds
 // the control plane above to the local simulator but sends model calls to real AWS, because
@@ -358,6 +371,23 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
+// Transport security, applied in the pipeline below. Browsers are redirected with a
+// permanent, method-preserving 308; API paths never get as far as a redirect.
+builder.Services.AddHsts(o =>
+{
+    o.MaxAge = TimeSpan.FromDays(Math.Max(1, gatewayOptions.Security.HstsMaxAgeDays));
+    o.IncludeSubDomains = false;
+});
+
+builder.Services.AddHttpsRedirection(o =>
+{
+    o.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
+    if (gatewayOptions.Security.HttpsPort is int httpsPort)
+    {
+        o.HttpsPort = httpsPort;
+    }
+});
+
 var app = builder.Build();
 
 // ---------------------------------------------------------------------------
@@ -365,6 +395,9 @@ var app = builder.Build();
 // ---------------------------------------------------------------------------
 if (gatewayOptions.Security.RequireHttps)
 {
+    // API calls over plain HTTP are refused before anything else sees them; only what is
+    // left -- a browser opening the dashboard -- is redirected.
+    app.UseMiddleware<HttpsEnforcementMiddleware>();
     app.UseHsts();
     app.UseHttpsRedirection();
 }
@@ -429,7 +462,9 @@ app.UseStaticFiles(new StaticFileOptions
 app.MapGatewayEndpoints();
 app.MapDashboardEndpoints();
 
-if (oktaOptions.Enabled)
+// The simulator signs admin tokens for a directory compiled into the binary, so it is
+// Development-only twice over: StartupValidator refuses it elsewhere, and it is not mapped.
+if (oktaOptions.Enabled && app.Environment.IsDevelopment())
 {
     app.MapOktaSimulatorEndpoints();
 }

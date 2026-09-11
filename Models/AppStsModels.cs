@@ -51,7 +51,24 @@ public record AppStsTokenResponse
 
     [JsonPropertyName("isAdmin")]
     public bool IsAdmin { get; init; }
+
+    /// <summary>The token's jti: what the audit trail records and what a revocation would name.</summary>
+    [JsonPropertyName("tokenId")]
+    public string TokenId { get; init; } = string.Empty;
 }
+
+/// <summary>What to put in a new STS token.</summary>
+public record StsTokenSpec
+{
+    public string AppId { get; init; } = string.Empty;
+    public TimeSpan Duration { get; init; }
+    public string Scope { get; init; } = GatewayScopes.Invoke;
+    public bool IsAdmin { get; init; }
+    public string? CallerId { get; init; }
+}
+
+/// <summary>A freshly issued STS token and the facts about it an audit record needs.</summary>
+public record IssuedStsToken(string Token, DateTimeOffset IssuedAt, DateTimeOffset ExpiresAt, string TokenId, string Scope);
 
 /// <summary>
 /// Decoded claims payload encapsulated inside the cryptographically signed STS token.

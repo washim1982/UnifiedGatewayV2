@@ -21,6 +21,12 @@ public interface ISecurityService
         string? callerId = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Issues a token and reports its jti and actual lifetime, so the caller can write an
+    /// audit record naming the exact token it handed out.
+    /// </summary>
+    Task<IssuedStsToken> IssueStsTokenAsync(StsTokenSpec spec, CancellationToken cancellationToken = default);
+
     Task<(bool isValid, AppStsTokenPayload? payload, string? failureReason)> ValidateAppStsTokenAsync(
         string token,
         CancellationToken cancellationToken = default);

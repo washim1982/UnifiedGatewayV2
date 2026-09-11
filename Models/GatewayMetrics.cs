@@ -137,6 +137,10 @@ public record ManagementAuditEntry
     [JsonPropertyName("sourceIp")]
     public string? SourceIp { get; init; }
 
+    /// <summary>jti of the STS token the action was performed with, or of the token it minted.</summary>
+    [JsonPropertyName("tokenId")]
+    public string? TokenId { get; init; }
+
     [JsonPropertyName("success")]
     public bool Success { get; init; }
 

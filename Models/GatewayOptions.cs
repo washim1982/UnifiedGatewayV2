@@ -105,8 +105,26 @@ public class SecurityOptions
     /// <summary>Hard ceiling on any requested STS lifetime.</summary>
     public int MaxStsTokenLifetimeSeconds { get; set; } = 3600; // 1 hour
 
-    /// <summary>Emit HSTS and redirect HTTP to HTTPS. Disable only for local development.</summary>
+    /// <summary>
+    /// Ceiling on an admin STS token, which can only be minted from the break-glass credential.
+    /// Shorter than an application token's: it is the highest privilege the gateway issues.
+    /// </summary>
+    public int MaxAdminStsTokenLifetimeSeconds { get; set; } = 900; // 15 minutes
+
+    /// <summary>
+    /// Emit HSTS, redirect browsers to HTTPS, and refuse API calls made over plain HTTP.
+    /// Disable only for local development; StartupValidator refuses it anywhere else.
+    /// </summary>
     public bool RequireHttps { get; set; } = true;
+
+    /// <summary>
+    /// Port browsers are redirected to. Null lets ASP.NET Core discover it from the server's
+    /// bindings, which under IIS is the site's HTTPS binding.
+    /// </summary>
+    public int? HttpsPort { get; set; }
+
+    /// <summary>Strict-Transport-Security max-age, in days.</summary>
+    public int HstsMaxAgeDays { get; set; } = 365;
 
     /// <summary>Milliseconds any single guardrail pattern may run before it is treated as a violation.</summary>
     public int RegexTimeoutMs { get; set; } = 250;

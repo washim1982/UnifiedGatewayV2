@@ -22,7 +22,12 @@ public interface IApplicationRegistryService
     /// </summary>
     Task<(bool isValid, AppConfig? app, CallerContext? caller)> AuthenticateAppAsync(
         string appId, string apiKey, CancellationToken cancellationToken = default);
-    Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(string? appId, string apiKey, int durationSeconds = 3600, string scope = "invoke", string? callerId = null, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Exchanges an application key, or the break-glass credential, for an STS token. Every
+    /// issuance is written to the audit trail with the token's jti and the caller's address;
+    /// a break-glass issuance is also logged at Warning for alerting.
+    /// </summary>
+    Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(string? appId, string apiKey, int durationSeconds = 3600, string scope = "invoke", string? callerId = null, string? sourceIp = null, CancellationToken cancellationToken = default);
     Task<AppStsTokenResponse> MintStsTokenDirectAsync(string appId, int durationSeconds = 3600, string scope = "invoke", bool isAdmin = false, string? callerId = null, CancellationToken cancellationToken = default);
     Task RecordMetricAsync(RequestLogEntry log, CancellationToken cancellationToken = default);
 

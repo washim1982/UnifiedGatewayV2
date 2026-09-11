@@ -115,7 +115,21 @@ public class SecurityService : ISecurityService
         string? callerId = null,
         CancellationToken cancellationToken = default)
     {
-        var clampedDuration = ClampDuration(duration);
+        var issued = await IssueStsTokenAsync(new StsTokenSpec
+        {
+            AppId = appId,
+            Duration = duration,
+            Scope = scope,
+            IsAdmin = isAdmin,
+            CallerId = callerId
+        }, cancellationToken);
+
+        return (issued.Token, issued.ExpiresAt);
+    }
+
+    public async Task<IssuedStsToken> IssueStsTokenAsync(StsTokenSpec spec, CancellationToken cancellationToken = default)
+    {
+        var clampedDuration = ClampDuration(spec.Duration, spec.IsAdmin);
         var now = DateTimeOffset.UtcNow;
         var expiresAt = now.Add(clampedDuration);
 
@@ -124,19 +138,20 @@ public class SecurityService : ISecurityService
         var payload = new AppStsTokenPayload
         {
             Jti = Guid.NewGuid().ToString("N"),
-            AppId = appId,
+            AppId = spec.AppId,
             IssuedAtUnix = now.ToUnixTimeSeconds(),
             ExpiresAtUnix = expiresAt.ToUnixTimeSeconds(),
-            Scope = GatewayScopes.Normalize(scope),
-            IsAdmin = isAdmin,
-            CallerId = callerId,
+            Scope = GatewayScopes.Normalize(spec.Scope),
+            IsAdmin = spec.IsAdmin,
+            CallerId = spec.CallerId,
             Generation = signingKey.Generation
         };
 
         var payloadSegment = Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload));
         var signatureSegment = Base64UrlEncode(ComputeSignature(payloadSegment, signingKey.Key));
 
-        return ($"{StsPrefix}{payloadSegment}.{signatureSegment}", expiresAt);
+        return new IssuedStsToken(
+            $"{StsPrefix}{payloadSegment}.{signatureSegment}", now, expiresAt, payload.Jti, payload.Scope);
     }
 
     public async Task<(bool isValid, AppStsTokenPayload? payload, string? failureReason)> ValidateAppStsTokenAsync(
@@ -337,11 +352,18 @@ public class SecurityService : ISecurityService
     /// <summary>
     /// Bounds the requested lifetime. The ceiling is configuration-driven so an environment
     /// can tighten it, and it is what stops a "short temporary secret" being a week long.
+    /// Admin tokens get the lower of the two ceilings: each one is break-glass in bearer form.
     /// </summary>
-    private TimeSpan ClampDuration(TimeSpan requested)
+    private TimeSpan ClampDuration(TimeSpan requested, bool isAdmin)
     {
         var min = TimeSpan.FromSeconds(30);
-        var max = TimeSpan.FromSeconds(Math.Max(60, _securityOptions.MaxStsTokenLifetimeSeconds));
+        var maxSeconds = Math.Max(60, _securityOptions.MaxStsTokenLifetimeSeconds);
+        if (isAdmin)
+        {
+            maxSeconds = Math.Min(maxSeconds, Math.Max(60, _securityOptions.MaxAdminStsTokenLifetimeSeconds));
+        }
+
+        var max = TimeSpan.FromSeconds(maxSeconds);
 
         if (requested < min) return min;
         if (requested > max)

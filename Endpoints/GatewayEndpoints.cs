@@ -24,6 +24,7 @@ public static class GatewayEndpoints
             [FromBody] AppStsTokenRequest? request,
             [FromHeader(Name = "X-API-Key")] string? xApiKey,
             [FromHeader(Name = "Authorization")] string? authHeader,
+            HttpContext ctx,
             IApplicationRegistryService registryService,
             CancellationToken ct) =>
         {
@@ -44,14 +45,18 @@ public static class GatewayEndpoints
             AppStsTokenResponse? tokenResponse;
             try
             {
+                // The source address goes into the audit record of the issuance, so a token --
+                // above all a break-glass one -- can be traced to where it was requested from.
                 tokenResponse = await registryService.IssueStsTokenForAppAsync(
-                    body.AppId, apiKey, body.DurationSeconds, body.Scope, body.CallerId, ct);
+                    body.AppId, apiKey, body.DurationSeconds, body.Scope, body.CallerId,
+                    ctx.Connection.RemoteIpAddress?.ToString(), ct);
             }
             catch (ArgumentException ex)
             {
-                // An unrecognised scope is the caller asking for something that does not
-                // exist, not a server fault. Say so plainly and name the valid values.
-                return Results.BadRequest(new { error = "INVALID_SCOPE", message = ex.Message });
+                // A bad scope or callerId is the caller asking for something the gateway will
+                // not issue, not a server fault. Say which, plainly.
+                var code = ex.ParamName == "callerId" ? "INVALID_CALLER_ID" : "INVALID_SCOPE";
+                return Results.BadRequest(new { error = code, message = ex.Message });
             }
 
             if (tokenResponse == null)
@@ -146,9 +151,11 @@ public static class GatewayEndpoints
             ISecurityService securityService,
             IAdminCredentialService adminCredentials,
             IModelRouter router,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             CallerContext? caller = null;
+            var breakGlassLog = loggerFactory.CreateLogger("UnifiedGateway.BreakGlass");
 
             if (options.Value.Security.EnforceAppApiKey)
             {
@@ -169,11 +176,15 @@ public static class GatewayEndpoints
 
                         if (isAuthorized)
                         {
+                            breakGlassLog.LogWarning(
+                                "BREAK-GLASS: admin STS token {Jti} used on the universal endpoint from {RemoteIp}.",
+                                payload!.Jti, ctx.Connection.RemoteIpAddress);
+
                             caller = new CallerContext
                             {
-                                Actor = payload!.CallerId ?? payload.AppId,
+                                Actor = CallerContext.ActorFor(payload!),
                                 AuthType = "AdminStsToken",
-                                TokenId = payload.Jti
+                                TokenId = payload!.Jti
                             };
                         }
                     }
@@ -182,6 +193,10 @@ public static class GatewayEndpoints
                         isAuthorized = await adminCredentials.VerifyAsync(apiKey, ct);
                         if (isAuthorized)
                         {
+                            breakGlassLog.LogWarning(
+                                "BREAK-GLASS: master admin credential used on the universal endpoint from {RemoteIp}.",
+                                ctx.Connection.RemoteIpAddress);
+
                             caller = new CallerContext { Actor = "break-glass", AuthType = "MasterAdminKey" };
                         }
                     }

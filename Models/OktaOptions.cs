@@ -14,11 +14,15 @@ public class OktaOptions
 {
     public const string SectionName = "Gateway:Okta";
 
-    /// <summary>Run the built-in Okta simulator (issues tokens and serves JWKS locally).</summary>
-    public bool Enabled { get; set; } = true;
+    /// <summary>
+    /// Run the built-in Okta simulator (issues tokens and serves JWKS locally). Off by default:
+    /// it signs admin tokens for a directory compiled into the binary, so it is Development
+    /// only. StartupValidator refuses it anywhere else, and Program.cs does not map it.
+    /// </summary>
+    public bool Enabled { get; set; }
 
     /// <summary>Issuer claim written into simulated tokens and required on validation.</summary>
-    public string Issuer { get; set; } = "https://okta-sim.local/oauth2/default";
+    public string Issuer { get; set; } = string.Empty;
 
     /// <summary>Audience claim written into simulated tokens and required on validation.</summary>
     public string Audience { get; set; } = "unified-gateway";
