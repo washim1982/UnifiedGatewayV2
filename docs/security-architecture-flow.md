@@ -111,6 +111,104 @@ flowchart LR
 | Gateway → on-prem models | Sanitised prompts | The backend is reachable only through the gateway *(not yet true — SL-10)* |
 | Gateway → Secrets Manager / S3 | Signing material, the audit trail | The web tier cannot rewrite or erase its own history *(not yet true — SL-11)* |
 
+### 2.1 Overall data flow
+
+Where each piece of data enters, which process handles it, where it is stored, and where it leaves. The left-hand column is a request being served; the right-hand column is what the gateway records about it. The caller and the operator each appear twice, once sending and once receiving, so no flow has to loop back to the top.
+
+```mermaid
+flowchart TB
+    OPS["Operator<br/>browser dashboard"]
+    AUTO["Automation<br/>IAM role"]
+    APP["Client application"]
+    OKTA{{"Okta"}}
+    STS{{"AWS STS"}}
+
+    AUTH(["HTTPS edge<br/>authenticate and authorize"])
+    TOKEN(["Issue STS token"])
+    MGMT(["Management API"])
+    GIN(["Ingress guardrail"])
+    ROUTER(["Model router"])
+    GOUT(["Egress guardrail"])
+    REC(["Audit recorder"])
+    BILL(["Billing and metrics"])
+
+    REG[("App registry<br/>JSON file on host")]
+    SEC[("Secrets Manager and KMS")]
+    S3[("S3 audit trail")]
+
+    RA{{"IAM Roles Anywhere"}}
+    BR{{"Bedrock Runtime"}}
+    LLM{{"On-prem LLMs"}}
+
+    APPOUT["Client application<br/>receives the response"]
+    OPSOUT["Operator<br/>reads spend and metrics"]
+
+    OPS -- "F1 sign-in" --> OKTA
+    OKTA -- "F1 access token" --> OPS
+    OPS -- "F2 JWT + change" --> AUTH
+    AUTO -- "F3 signed request" --> AUTH
+    AUTH -- "F3 relay" --> STS
+    STS -- "F3 caller ARN" --> AUTH
+    APP -- "F4 ug_live_ key" --> TOKEN
+    TOKEN -- "F4 ug_sts_ token" --> APP
+    APP -- "F5 prompt + credential" --> AUTH
+    SEC -. "F6 keys · policy" .-> AUTH
+    SEC -. "F6 signing key" .-> TOKEN
+    AUTH -- "F7 authorized change" --> MGMT
+    MGMT -- "F7 config · key hash" --> REG
+    MGMT -. "F7 guardrail policy" .-> GIN
+    AUTH -- "F8 prompt" --> GIN
+    GIN -- "F9 redacted prompt" --> ROUTER
+    REG -. "F9 system prompt · model" .-> ROUTER
+    RA -. "F10 temporary AWS credentials" .-> ROUTER
+    ROUTER -- "F11 SigV4 · TLS" --> BR
+    ROUTER -- "F11 plain HTTP" --> LLM
+    BR -- "F11 completion" --> GOUT
+    LLM -- "F11 completion" --> GOUT
+    GOUT -- "F12 sanitised response" --> APPOUT
+    ROUTER -- "F13 usage and outcome" --> REC
+    MGMT -- "F13 management record" --> REC
+    TOKEN -- "F13 issuance record" --> REC
+    REC -- "F14 batched every 30 s" --> S3
+    S3 -- "F15 spend history" --> BILL
+    BILL -- "F15 reports · exports" --> OPSOUT
+
+    classDef entity fill:#e3eef8,stroke:#26566f,color:#10304a
+    classDef process fill:#e6f2ea,stroke:#2c6449,color:#173d2a
+    classDef store fill:#fbf0dc,stroke:#a4620f,color:#4d2e05
+    classDef service fill:#eeeeee,stroke:#777777,color:#333333
+    class OPS,AUTO,APP,APPOUT,OPSOUT entity
+    class AUTH,TOKEN,MGMT,GIN,ROUTER,GOUT,REC,BILL process
+    class REG,SEC,S3 store
+    class OKTA,STS,RA,BR,LLM service
+```
+
+**Key:** blue — external entity · green — gateway process · amber — data store · grey — external service · dashed arrow — a read or a supporting flow.
+
+| Flow | From → to | Data | Sensitivity | Protection |
+| :--- | :--- | :--- | :--- | :--- |
+| F1 | Operator ↔ Okta | Username and password in; RS256 access token with group claims out. The gateway separately fetches Okta's public signing keys (JWKS). | Credential | TLS to the tenant. The in-process simulator stands in, in Development only (SL-02). |
+| F2 | Operator → HTTPS edge | Okta JWT and a management request | Credential, configuration | HTTPS only. JWT issuer, audience, lifetime and RS256 signature validated. IAM action checked per endpoint. |
+| F3 | Automation → edge → AWS STS | SigV4-signed `GetCallerIdentity` request in; caller ARN back | Proof of identity — no secret crosses | TLS. Relayed only to allow-listed STS hosts, only that call, only signed headers. Bound to this gateway; five-minute window (SL-01). |
+| F4 | Application ↔ token issuance | `ug_live_` key in; `ug_sts_` token out | Secret | HTTPS. Key compared as a SHA-256 hash in constant time. HMAC-signed token, 15 min default, 1 h ceiling. Every issuance audited. |
+| F5 | Application → edge | Prompt plus key or token | Prompt may contain PCI, PII or secrets | HTTPS. Credential validated; token scope and app match checked. Rate-limited, though the limit can be sidestepped (SL-05). |
+| F6 | Secrets Manager → edge, token issuance | Signing key, admin key, access policy | Secret | TLS with SigV4 under the host's temporary credentials. KMS-encrypted at rest. Cached in memory for up to 300 s. |
+| F7 | Edge → management → registry, guardrail | Application config, key hash, system prompt, rate card; guardrail policy. A new key is returned to the operator once. | Confidential (system prompts); security configuration | Only the key's hash is stored. The registry is plaintext JSON on the host (SL-14). Guardrail policy lives in memory and is only partly audited (SL-07). |
+| F8 | Edge → ingress guardrail | Prompt | As F5 | In process. Block mode returns 422 and nothing leaves the gateway. |
+| F9 | Ingress guardrail and registry → model router | Redacted prompt; the app's system prompt, model and fallback | Redaction is best-effort (SL-08) and skipped in AuditOnly mode | In process. The system prompt comes from the registry, not the caller. |
+| F10 | Roles Anywhere → router | Temporary AWS credentials, 15–60 minutes | Credential | X.509-signed CreateSession; the private key stays non-exportable in the Windows store. The same credentials sign every S3, KMS and Secrets Manager call. |
+| F11 | Router ↔ Bedrock or on-prem model | Prompt and system prompt out; completion back | Confidential | Bedrock: TLS and SigV4. On-prem: **plain HTTP, no authentication** (SL-10). An unknown provider falls back to Bedrock (SL-09). |
+| F12 | Egress guardrail → application | Sanitised completion | Confidential | HTTPS. A scanner error withholds the output. |
+| F13 | Router, management and token issuance → audit recorder | Token counts, cost, outcome, guardrail rule names, actor, auth type, `jti`, source IP, traceId; management and issuance records | Operational metadata — **no prompt or completion text** | In process. Cost frozen at write time. |
+| F14 | Audit recorder → S3 | Batched NDJSON objects under `audit/dt=YYYY-MM-DD/`, every 30 s or 100 records | Audit record | TLS with SigV4. Up to 30 s is lost on a crash, and the gateway's role can delete the trail (SL-11). |
+| F15 | S3 → billing → operator | Spend by application and period, recent metrics, CSV / JSON / XLSX exports | Business-confidential | HTTPS. `gateway:ReadBilling` and `gateway:ReadMetrics` required. Every export audited. |
+| F16 | Gateway → host logs *(not drawn)* | Warnings, `BREAK-GLASS:` events, authentication failures | Security events | Local to the host; SIEM export not yet built. |
+
+Two properties follow from the table:
+
+- **The gateway never persists prompts or completions.** They exist in memory for the life of one request. What it writes — to S3 and to the logs — is counts, rule names, outcomes and who asked. The model provider sees the content only after the ingress guardrail, redacted unless the mode is AuditOnly.
+- **Customer content leaves the gateway along three flows only:** to Bedrock or an on-prem model (F11), and back to the caller (F12). Of those, only the on-prem hop is unencrypted (SL-10).
+
 ---
 
 ## 3. Request flows
