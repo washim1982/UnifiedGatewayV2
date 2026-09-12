@@ -1,3 +1,4 @@
+﻿using System.Net;
 using System.Text.RegularExpressions;
 using UnifiedGateway.Models;
 
@@ -24,7 +25,8 @@ public static partial class StartupValidator
         GatewayOptions gateway,
         CloudOptions cloud,
         IHostEnvironment environment,
-        OktaOptions? okta = null)
+        OktaOptions? okta = null,
+        string? urls = null)
     {
         var failures = new List<string>();
 
@@ -112,11 +114,37 @@ public static partial class StartupValidator
         }
 
         // --- Access control ----------------------------------------------------
-        if (!cloud.AccessControl.Enabled && cloud.AccessControl.AdminRoleArns.Length == 0 && !isDevelopment)
+        // With access control off every authenticated principal is authorized, so an Okta
+        // group that was only meant to read becomes a full administrator. Listing AdminRoleArns
+        // does not change that: the authorization handler never consults them while the switch
+        // is off. Outside Development the switch itself is the failure.
+        if (!cloud.AccessControl.Enabled && !isDevelopment)
         {
             failures.Add(
-                "Gateway:Cloud:AccessControl is disabled and no AdminRoleArns are listed, so every " +
-                "authenticated caller would be a full administrator.");
+                "Gateway:Cloud:AccessControl:Enabled is false. With access control disabled every " +
+                "authenticated caller is a full administrator, whatever AdminRoleArns lists. " +
+                "Enable it and grant access through the policy document.");
+        }
+
+        // --- Development reachability -----------------------------------------
+        // Development is exempt from the transport and authentication rules above because it
+        // is assumed to be a developer's loopback. The local IAM simulator grants every role
+        // that is asked for with Allow */*, while Bedrock calls still go to real AWS on the
+        // developer's profile, so a Development host listening on the network is an open
+        // admin plane attached to a live spend account. Hold it to the assumption.
+        if (isDevelopment)
+        {
+            foreach (var url in ParseUrls(urls))
+            {
+                if (!IsLoopback(url))
+                {
+                    failures.Add(
+                        $"The Development profile is bound to '{url}', which is reachable from the " +
+                        "network. Development disables the transport and authentication checks and " +
+                        "auto-grants every IAM role, so it must listen on localhost only. Bind to " +
+                        "localhost, or run this host under a different environment name.");
+                }
+            }
         }
 
         // --- Break-glass -------------------------------------------------------
@@ -457,6 +485,59 @@ public static partial class StartupValidator
                 failures.Add("Gateway:Aws:RolesAnywhere:Certificate:PfxPath is required when Source is 'PfxFile'.");
                 break;
         }
+    }
+
+    /// <summary>Splits the host's URL list ("http://a;https://b") into individual URLs.</summary>
+    private static IEnumerable<string> ParseUrls(string? urls) =>
+        string.IsNullOrWhiteSpace(urls)
+            ? []
+            : urls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>
+    /// True when a listen URL admits only connections from this machine. Kestrel's wildcard
+    /// forms -- "*", "+", "0.0.0.0", "[::]" -- all bind every interface.
+    /// </summary>
+    private static bool IsLoopback(string url)
+    {
+        // Strip the scheme and any path, leaving the authority:
+        // "http://0.0.0.0:5000/" -> "0.0.0.0:5000".
+        var authority = url;
+        var schemeEnd = authority.IndexOf("://", StringComparison.Ordinal);
+        if (schemeEnd >= 0)
+        {
+            authority = authority[(schemeEnd + 3)..];
+        }
+
+        var pathStart = authority.IndexOf('/');
+        if (pathStart >= 0)
+        {
+            authority = authority[..pathStart];
+        }
+
+        string host;
+        if (authority.StartsWith('['))
+        {
+            // An IPv6 literal is bracketed; the port, if any, follows the closing bracket.
+            var close = authority.IndexOf(']');
+            if (close < 0)
+            {
+                return false;
+            }
+
+            host = authority[1..close];
+        }
+        else
+        {
+            var colon = authority.IndexOf(':');
+            host = colon >= 0 ? authority[..colon] : authority;
+        }
+
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
     }
 
     [GeneratedRegex(@"^\d{12}$")]

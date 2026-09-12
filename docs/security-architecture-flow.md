@@ -7,7 +7,7 @@ Prepared for the security team: what the gateway protects, how a request moves t
 | | |
 | :--- | :--- |
 | **Target** | `UnifiedGatewayV2` · branch `main` · reviewed at commit `57f9858` |
-| **Remediation** | SL-01 to SL-04 fixed in the working tree (not yet committed) · 263 tests passing, up from 195 |
+| **Remediation** | Round 1: SL-01 to SL-04 · Round 2: SL-12, SL-13, SL-16, SL-17 · all committed · 293 tests passing, up from 195 |
 | **Date** | 2026-09-10 |
 | **Method** | Static review of source, configuration and deployment scripts. Guardrail bypass inputs were run against the shipped regex patterns on the .NET regex engine. The fixes are covered by unit tests. Nothing was deployed or exploited. |
 | **Deployment assumed** | Windows Server + IIS in-process, `ASPNETCORE_ENVIRONMENT=Production`, `Gateway:Cloud:Provider=Aws` |
@@ -22,7 +22,7 @@ The gateway sits between internal applications and large language models — AWS
 - **Data plane** (`/gateway/*`). Applications invoke models with an API key or a short-lived STS token. Every prompt and every response passes through a guardrail.
 - **Management plane** (`/api/*`). Operators register applications, mint and rotate credentials, change guardrail policy and read billing. Every endpoint requires authentication plus a named IAM action.
 
-The review found **17 security loops**. The four that let an outsider in are now fixed:
+The review found **17 security loops**. Eight are now fixed. The four that let an outsider in went first:
 
 | ID | Was | Now |
 | :--- | :--- | :--- |
@@ -31,13 +31,23 @@ The review found **17 security loops**. The four that let an outsider in are now
 | **SL-03** · High | The IIS installer created an HTTP-only site, so "mandatory TLS" did nothing. Test was exempt despite being networked. | HTTPS-only binding. API calls over HTTP are refused with `HTTPS_REQUIRED`. Only Development is exempt. |
 | **SL-04** · High | Admin STS tokens skipped scope checks on `/api`, chose their own identity, and were minted without an audit record. | Admin scope required. Break-glass acts as a configured principal. Every mint is audited and alerted, and admin tokens live at most 15 minutes. |
 
-**13 loops remain open: 8 medium and 5 low, no critical or high.** None of them lets an unauthenticated caller in. They concern:
+A second round then closed the four that were self-contained — a validator rule, an endpoint's response shape, and a resilience policy:
+
+| ID | Was | Now |
+| :--- | :--- | :--- |
+| **SL-12** · Medium | `AccessControl:Enabled: false` passed startup validation as long as one admin ARN was listed, which made every authenticated principal — every Okta Developer — a full administrator. | The switch itself is refused outside Development. Listing ARNs no longer excuses it. |
+| **SL-13** · Low | `/gateway/sts/inspect` returned the claims of any correctly signed token, expired or revoked ones included, giving an oracle for testing a stolen credential outside the invoke audit. `/status` disclosed the version. | A token that does not validate returns only "not valid" and whether it expired — no app, scope, caller or timestamps, and the same message whether it was expired, revoked or forged. Each rejection is logged. `/status` reports liveness only. |
+| **SL-16** · Low | Development auto-grants every IAM role with `Allow */*` and disables the transport checks, yet nothing stopped a Development host from listening on the network. | Startup refuses any non-loopback binding in Development. |
+| **SL-17** · Low | One circuit breaker instance was shared by Ollama, LM Studio and llama.cpp, so one dead backend opened the circuit for all three, and generation POSTs were retried after a timeout. | A breaker per backend, and retries restricted to idempotent requests. |
+
+**9 loops remain open: 7 medium and 2 low, no critical or high.** None of them lets an unauthenticated caller in. They concern:
 - rate-limit evasion
 - revocation granularity
 - guardrail weakening and evasion
 - data residency on fallback
 - on-prem model servers reachable around the gateway
 - audit-trail integrity
+- registry confidentiality at rest
 - documentation drift
 
 Section 6 gives the order.
@@ -305,11 +315,11 @@ flowchart TD
     POL -- allow --> ALLOW["Handler runs · A2 audit record<br/>principal · auth type · token id"]
     NOROLE --> R403
 
-    G12["SL-12 access control off makes<br/>every authenticated caller admin"]:::gap -.- EN
+    F12["SL-12 fixed · AccessControl:Enabled false<br/>is refused at startup outside Development"]:::fixed -.- EN
 
     classDef gap fill:#fde2e1,stroke:#c0392b,color:#7b1d15
     classDef fixed fill:#dff1e6,stroke:#2c6449,color:#173d2a
-    class VER,STSV,BG,SIM fixed
+    class VER,STSV,BG,SIM,F12 fixed
 ```
 
 ### 3.3 Credential lifecycle — host identity, keys and tokens
@@ -355,9 +365,10 @@ flowchart LR
     D --> X2["401 Unrecognised credential<br/>SL-01 fixed"]
     A -. "signs in to a leftover Okta simulator" .-> X3["Simulator refused at startup<br/>and not mapped · SL-02 fixed"]
     A -. "replays a break-glass token scoped read" .-> X4["401 scope does not permit<br/>management · SL-04 fixed"]
+    A -. "probes a stolen token at /sts/inspect" .-> X5["Only 'not valid' · no claims,<br/>same answer for forged · SL-13 fixed"]
 
     classDef blocked fill:#dff1e6,stroke:#2c6449,color:#173d2a
-    class X1,X2,X3,X4 blocked
+    class X1,X2,X3,X4,X5 blocked
 ```
 
 Before the fixes, every step of this chain succeeded. Anyone who could reach the port got full control of the management plane in Production and Test, over plain HTTP.
@@ -395,7 +406,7 @@ Status key: **Implemented** — present and correct as far as review and tests s
 | ID | Control | Implementation | Why it is needed | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | Z1 | Deny-by-default on the whole `/api` group | [`DashboardEndpoints.cs:72-75`](../Endpoints/DashboardEndpoints.cs#L72-L75) | A new endpoint cannot ship unguarded because somebody forgot an attribute. | Implemented |
-| Z2 | Per-action IAM policy evaluation: explicit Deny, then Allow, else implicit deny. Engine errors deny. | [`GatewayAuthentication.cs`](../Auth/GatewayAuthentication.cs) (`IamAuthorizationHandler`), [`AwsProviders.cs:195-346`](../Services/Cloud/Aws/AwsProviders.cs#L195-L346) | Least privilege: an Auditor reads, an AppOwner creates, and only a PlatformAdmin changes guardrails or rotates the signing key. | Partial — SL-12 |
+| Z2 | Per-action IAM policy evaluation: explicit Deny, then Allow, else implicit deny. Engine errors deny. | [`GatewayAuthentication.cs`](../Auth/GatewayAuthentication.cs) (`IamAuthorizationHandler`), [`AwsProviders.cs:195-346`](../Services/Cloud/Aws/AwsProviders.cs#L195-L346) | Least privilege: an Auditor reads, an AppOwner creates, and only a PlatformAdmin changes guardrails or rotates the signing key. | Yes |
 | Z3 | App isolation: the token's `appId` must match the route, and the master key is not an app credential | [`ApplicationRegistryService.cs:382-415`](../Services/ApplicationRegistryService.cs#L382-L415) | One tenant cannot invoke another tenant's application, system prompt or budget. | Implemented |
 | Z4 | Scope enforcement: `read` cannot invoke, and only `admin` can manage | [`ApplicationRegistryService.cs:391-397`](../Services/ApplicationRegistryService.cs#L391-L397), [`GatewayAuthentication.cs:171`](../Auth/GatewayAuthentication.cs#L171) | A restriction the API advertises has to be enforced, or operators will rely on something that does nothing. | Implemented |
 | Z5 | Universal endpoint limited to admins | [`GatewayEndpoints.cs`](../Endpoints/GatewayEndpoints.cs) (`/universal/invoke`) | Choosing the model, provider and system prompt is a privileged capability. | Implemented |
@@ -432,10 +443,10 @@ Status key: **Implemented** — present and correct as far as review and tests s
 
 | ID | Control | Implementation | Why it is needed | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| S1 | `StartupValidator` refuses insecure configuration outside Development: default keys, auth disabled, wildcard CORS, HTTP, long TTLs, either simulator, the Okta simulator, unsubstituted placeholders, a missing break-glass principal, loosely scoped AWS identity | [`StartupValidator.cs`](../Startup/StartupValidator.cs) | A misconfiguration fails the deployment instead of running quietly insecure. An environment nobody configured refuses to boot on the template. | Partial — SL-12 |
+| S1 | `StartupValidator` refuses insecure configuration outside Development: default keys, auth disabled, access control disabled, wildcard CORS, HTTP, long TTLs, either simulator, the Okta simulator, unsubstituted placeholders, a missing break-glass principal, loosely scoped AWS identity — and in Development, a binding that is not loopback | [`StartupValidator.cs`](../Startup/StartupValidator.cs) | A misconfiguration fails the deployment instead of running quietly insecure. An environment nobody configured refuses to boot on the template. | Yes |
 | S2 | Swagger in Development only | [`Program.cs`](../Program.cs) (Swagger block) | No free map of the management surface in reachable environments. | Implemented |
 | S3 | `NuGetAudit`, locked restore, CodeQL `security-extended`, gitleaks | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | Vulnerable dependencies and committed credentials fail the pull request. | Implemented |
-| S4 | Retry, circuit breaker and fallback on providers | [`Program.cs:167-191`](../Program.cs#L167-L191), [`ModelRouter.cs:228-294`](../Services/ModelRouter.cs#L228-L294) | Availability of the service for every tenant. | Partial — SL-09, SL-17 |
+| S4 | Retry, circuit breaker and fallback on providers | [`Program.cs:167-191`](../Program.cs#L167-L191), [`ModelRouter.cs:228-294`](../Services/ModelRouter.cs#L228-L294) | Availability of the service for every tenant. One circuit breaker per backend, and only idempotent requests are retried. | Partial — SL-09 |
 
 ---
 
@@ -454,12 +465,12 @@ Status key: **Implemented** — present and correct as far as review and tests s
 | [SL-09](#sl-09--routing-fails-open-to-the-cloud) | Medium | Routing fails open to the cloud | Open |
 | [SL-10](#sl-10--on-prem-model-servers-can-be-called-around-the-gateway) | Medium | On-prem model servers can be called around the gateway | Open |
 | [SL-11](#sl-11--the-audit-trail-can-be-erased-by-the-principal-it-audits) | Medium | The audit trail can be erased by the principal it audits | Open |
-| [SL-12](#sl-12--disabling-access-control-passes-startup-validation) | Medium | Disabling access control passes startup validation | Open |
-| [SL-13](#sl-13--unauthenticated-metadata-endpoints) | Low | Unauthenticated metadata endpoints | Open |
+| [SL-12](#sl-12--disabling-access-control-passes-startup-validation) | Medium | Disabling access control passes startup validation | **Fixed** |
+| [SL-13](#sl-13--unauthenticated-metadata-endpoints) | Low | Unauthenticated metadata endpoints | **Fixed** |
 | [SL-14](#sl-14--registry-and-system-prompts-are-plaintext-on-the-web-host) | Low | Registry and system prompts are plaintext on the web host | Open |
 | [SL-15](#sl-15--documentation-contradicts-the-code) | Low | Documentation contradicts the code | Open (partly reconciled) |
-| [SL-16](#sl-16--development-profile-is-an-open-admin-plane-with-real-bedrock-spend) | Low | Development profile is an open admin plane with real Bedrock spend | Open |
-| [SL-17](#sl-17--one-circuit-breaker-shared-by-every-local-backend) | Low | One circuit breaker shared by every local backend | Open |
+| [SL-16](#sl-16--development-profile-is-an-open-admin-plane-with-real-bedrock-spend) | Low | Development profile is an open admin plane with real Bedrock spend | **Fixed** |
+| [SL-17](#sl-17--one-circuit-breaker-shared-by-every-local-backend) | Low | One circuit breaker shared by every local backend | **Fixed** |
 
 ---
 
@@ -625,17 +636,23 @@ Code: [`GatewayAuthentication.cs:155-224`](../Auth/GatewayAuthentication.cs#L155
 
 ### SL-12 — Disabling access control passes startup validation
 
-**Medium · Open** · [`GatewayAuthentication.cs:320-335`](../Auth/GatewayAuthentication.cs#L320-L335) · [`StartupValidator.cs:115-120`](../Startup/StartupValidator.cs#L115-L120)
+**Medium · Fixed** · [`StartupValidator.cs`](../Startup/StartupValidator.cs) · [`GatewayAuthentication.cs:320-335`](../Auth/GatewayAuthentication.cs#L320-L335)
 
-**What happens.** With `AccessControl:Enabled: false`, every authenticated principal is authorized. The validator refuses this only when `AdminRoleArns` is also empty, so listing one ARN and disabling access control starts — and makes every Okta Developer a full admin. (The break-glass placeholder-account part of this finding was fixed under SL-04.)
+**Was.** With `AccessControl:Enabled: false`, every authenticated principal is authorized. The validator refused this only when `AdminRoleArns` was also empty, so listing one ARN and disabling access control started — and made every Okta Developer a full admin. Listing ARNs was never a mitigation: the authorization handler does not consult them while the switch is off. (The break-glass placeholder-account part of this finding was fixed under SL-04.)
 
-**Fix.** Refuse `Enabled: false` outside Development outright.
+**Fix.** The switch itself is the failure. Outside Development, `Enabled: false` is refused at startup whatever `AdminRoleArns` holds. Development may still run with it off, because the local IAM simulator grants everything regardless.
+
+**Proof.** Refused in Production, Staging and Test; still refused when an admin ARN is listed; accepted in Development.
 
 ### SL-13 — Unauthenticated metadata endpoints
 
-**Low · Open** · [`GatewayEndpoints.cs:79-101`](../Endpoints/GatewayEndpoints.cs#L79-L101) · [`SecurityService.cs:246-278`](../Services/SecurityService.cs#L246-L278) · [`Program.cs:472-478`](../Program.cs#L472-L478)
+**Low · Fixed** · [`SecurityService.cs`](../Services/SecurityService.cs) · [`Program.cs`](../Program.cs)
 
-`/gateway/sts/inspect` returns the claims of any validly signed token, expired or revoked ones included — an oracle for testing a stolen token that never reaches the invoke audit. `/status` discloses the version. **Fix:** return only validity and expiry, or require authentication.
+**Was.** `/gateway/sts/inspect` returned the claims of any validly signed token, expired or revoked ones included — an oracle for testing a stolen token that never reached the invoke audit. `/status` disclosed the version and framework.
+
+**Fix.** A token that does not validate now returns `isValid: false`, whether it had expired, and nothing else: no app id, scope, caller id or timestamps. The message is identical whether the token was expired, revoked or forged, so the endpoint cannot say which, and every rejected inspection is logged at Warning. A token that does validate still reports its own claims — the caller already holds it. `/status` reports liveness only.
+
+**Proof.** An expired token and a revoked one disclose no claims; expired, revoked and forged tokens return the same message; a valid token still reports its app id.
 
 ### SL-14 — Registry and system prompts are plaintext on the web host
 
@@ -655,15 +672,23 @@ The `architecture.md` sign-off table and the installer are now consistent with t
 
 ### SL-16 — Development profile is an open admin plane with real Bedrock spend
 
-**Low · Open** · [`appsettings.Development.json:120`](../appsettings.Development.json#L120) · [`appsettings.Development.json:136`](../appsettings.Development.json#L136) · [`LocalDotNetProviders.cs:291-319`](../Services/Cloud/LocalDotNet/LocalDotNetProviders.cs#L291-L319)
+**Low · Fixed** · [`StartupValidator.cs`](../Startup/StartupValidator.cs) · [`Program.cs`](../Program.cs)
 
-In Development, IamLocal auto-creates any role that is asked for, with `Allow */*`, while Bedrock calls go to real AWS on the developer's profile. `launchSettings.json` binds to localhost only. **Fix:** have `StartupValidator` refuse non-loopback URLs in Development.
+**Was.** In Development, IamLocal auto-creates any role that is asked for, with `Allow */*`, while Bedrock calls go to real AWS on the developer's profile. Development is also the one environment exempt from the HTTPS and app-authentication rules. `launchSettings.json` binds to localhost, but nothing held a Development host to that: an `ASPNETCORE_URLS` of `http://0.0.0.0:5000` started happily.
+
+**Fix.** The validator reads the host's URL list — where `ASPNETCORE_URLS`, `--urls` and `launchSettings`' `applicationUrl` all land — and refuses to start in Development if any binding is not loopback. Kestrel's wildcards (`*`, `+`, `0.0.0.0`, `[::]`) are all treated as network bindings. Outside Development the rule does not apply, since those hosts are meant to be reachable.
+
+**Proof.** Each wildcard form, a LAN address, a hostname and a mixed list are refused; `localhost`, `127.0.0.1`, `[::1]` and an empty list are accepted; Production may still bind `0.0.0.0`.
 
 ### SL-17 — One circuit breaker shared by every local backend
 
-**Low · Open** · [`Program.cs:167-191`](../Program.cs#L167-L191)
+**Low · Fixed** · [`LocalProviderResilience.cs`](../Startup/LocalProviderResilience.cs) · [`Program.cs`](../Program.cs)
 
-A single `CircuitBreakerAsync` instance is shared by all three local clients, and generation POSTs are retried. **Fix:** build a policy per client, and do not retry generation on timeout.
+**Was.** A single `CircuitBreakerAsync` instance was shared by all three local clients, so five failures from a dead Ollama opened the circuit for LM Studio and llama.cpp too — one backend down took all three out for thirty seconds. Generation POSTs were retried on timeout, and a generation that timed out may well have reached the model and be running: the retry burns a second generation, bills the application twice and can return the slower of two answers.
+
+**Fix.** `LocalProviderResilience` builds a fresh breaker per named client, and the retry policy is selected per request — applied to `GET`, `HEAD` and `OPTIONS`, replaced by a no-op for everything else. Extracting it from `Program.cs`'s top-level statements is what makes both rules testable.
+
+**Proof.** Two calls to the breaker factory return distinct instances; `GET`, `HEAD` and `OPTIONS` are retryable while `POST`, `PUT` and `DELETE` are not.
 
 ---
 
@@ -671,10 +696,10 @@ A single `CircuitBreakerAsync` instance is shared by all three local clients, an
 
 | When | Loops | Test that proves the fix |
 | :--- | :--- | :--- |
-| **Done** | SL-01 · SL-02 · SL-03 · SL-04 | 68 new tests in `SecurityLoopTests` and `ShippedConfigurationTests`; 263 passing in total |
+| **Done** | SL-01 · SL-02 · SL-03 · SL-04 · SL-12 · SL-13 · SL-16 · SL-17 | 98 new tests in `SecurityLoopTests` and `ShippedConfigurationTests`; 293 passing in total |
 | **Before production traffic** | Exercise SL-01's AWS identity and SL-03's installer against a staging account and an IIS host | A signed request from a real role authenticates, and a forged one is refused by STS · the installed site answers only on HTTPS with the expected certificate |
-| **Next sprint** (2–4 weeks) | SL-05 · SL-06 · SL-07 · SL-09 · SL-11 · SL-12 | 40 requests with distinct random keys → 429s from one IP · rotating an app key → its old STS token gets 401 · disabling one detector → audit carries the diff · unknown provider → 400 at create · gateway role policy has no `s3:DeleteObject` · `AccessControl:Enabled: false` outside Development → startup refuses |
-| **Planned** | SL-08 · SL-10 · SL-13 – SL-17 | Bypass inputs from SL-08 detected after normalisation · on-prem backend unreachable except from the gateway host · docs reconciled with a code citation per claim |
+| **Next sprint** (2–4 weeks) | SL-05 · SL-06 · SL-07 · SL-09 · SL-11 | 40 requests with distinct random keys → 429s from one IP · rotating an app key → its old STS token gets 401 · disabling one detector → audit carries the diff · unknown provider → 400 at create · gateway role policy has no `s3:DeleteObject` |
+| **Planned** | SL-08 · SL-10 · SL-14 · SL-15 | Bypass inputs from SL-08 detected after normalisation · on-prem backend unreachable except from the gateway host · the registry is unreadable on disk · docs reconciled with a code citation per claim |
 
 Items already open in `architecture.md` — per-application ownership, asymmetric KMS signing, a database registry, SIEM export, token budgets and a penetration test — remain valid. The penetration test should follow the "before production traffic" row and cover the management plane.
 
@@ -696,7 +721,7 @@ Items already open in `architecture.md` — per-application ownership, asymmetri
 
 The review covered every C# source file, configuration file, dashboard asset, deployment script and the CI workflow on `main` at `57f9858`.
 - The SL-08 regex results come from running the shipped patterns on the .NET regex engine.
-- The SL-01 to SL-04 fixes are covered by unit tests that drive the real authentication handler, identity provider, startup validator, registry and middleware, with only the network (STS) and the cloud stores replaced by in-memory doubles.
+- The fixes are covered by unit tests that drive the real authentication handler, identity provider, startup validator, security service, registry, resilience policy and middleware, with only the network (STS) and the cloud stores replaced by in-memory doubles.
 - The installer was checked with the PowerShell parser only.
 - No finding was tested against a running deployment, and the AWS provider path has still never run against a real account.
 

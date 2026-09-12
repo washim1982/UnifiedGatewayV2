@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -209,9 +209,59 @@ public class SecurityLoopTests
     }
 
     private static InvalidOperationException RefusedAtStartup(
-        GatewayOptions gateway, CloudOptions cloud, OktaOptions okta, string environment) =>
+        GatewayOptions gateway, CloudOptions cloud, OktaOptions okta, string environment, string? urls = null) =>
         Assert.Throws<InvalidOperationException>(() =>
-            StartupValidator.Validate(gateway, cloud, new FakeEnvironment(environment), okta));
+            StartupValidator.Validate(gateway, cloud, new FakeEnvironment(environment), okta, urls));
+
+    /// <summary>
+    /// Mints a correctly signed token that is already past its expiry. IssueAppStsTokenAsync
+    /// clamps a negative duration up to the configured default, so an expired token has to be
+    /// built against the same signing key the service will verify with.
+    /// </summary>
+    private static string ExpiredToken(
+        InMemorySigningKeyProvider signingKeys,
+        string appId = "victim-app",
+        string scope = GatewayScopes.Admin,
+        bool isAdmin = true,
+        string? callerId = "operator-7")
+    {
+        var key = signingKeys.GetCurrentAsync().Result;
+        var now = DateTimeOffset.UtcNow;
+
+        var payload = new AppStsTokenPayload
+        {
+            AppId = appId,
+            IssuedAtUnix = now.AddHours(-2).ToUnixTimeSeconds(),
+            ExpiresAtUnix = now.AddHours(-1).ToUnixTimeSeconds(),
+            Scope = scope,
+            IsAdmin = isAdmin,
+            CallerId = callerId,
+            Generation = key.Generation
+        };
+
+        static string Encode(byte[] bytes) =>
+            Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        var payloadSegment = Encode(JsonSerializer.SerializeToUtf8Bytes(payload));
+        using var hmac = new System.Security.Cryptography.HMACSHA256(key.Key);
+        var signature = Encode(hmac.ComputeHash(Encoding.UTF8.GetBytes(payloadSegment)));
+
+        return $"ug_sts_{payloadSegment}.{signature}";
+    }
+
+    /// <summary>A Development configuration the validator accepts; each test breaks one thing.</summary>
+    private static (GatewayOptions Gateway, CloudOptions Cloud, OktaOptions Okta) ValidDevelopment()
+    {
+        var gateway = new GatewayOptions();
+        gateway.Security.RequireHttps = false;
+        gateway.Security.AllowedCorsOrigins = ["http://localhost:3000"];
+        gateway.Aws.UseLocalProfile = true;
+
+        var cloud = new CloudOptions { Provider = CloudProviderMode.LocalDotNet, BedrockProvider = CloudProviderMode.Aws };
+        var okta = new OktaOptions { Enabled = true, Issuer = "https://okta-sim.local/oauth2/default" };
+
+        return (gateway, cloud, okta);
+    }
 
     #endregion
 
@@ -718,5 +768,184 @@ public class SecurityLoopTests
 
         Assert.True(isValid);
         Assert.Equal("break-glass [operator-7]", caller!.Actor);
+    }
+
+    // --- SL-12: access control cannot be switched off outside Development -------------------
+
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Staging")]
+    [InlineData("Test")]
+    public void SL12_DisablingAccessControlIsRefusedOutsideDevelopment(string environment)
+    {
+        var (gateway, cloud, okta) = ValidProduction();
+        cloud.AccessControl.Enabled = false;
+
+        var ex = RefusedAtStartup(gateway, cloud, okta, environment);
+
+        Assert.Contains("AccessControl:Enabled is false", ex.Message);
+    }
+
+    [Fact]
+    public void SL12_ListingAdminRoleArnsDoesNotExcuseDisablingAccessControl()
+    {
+        // The hole this closes: the old check passed as soon as one ARN was listed, but the
+        // authorization handler never consults AdminRoleArns while the switch is off, so every
+        // authenticated principal -- every Okta Developer included -- became a full administrator.
+        var (gateway, cloud, okta) = ValidProduction();
+        cloud.AccessControl.Enabled = false;
+        cloud.AccessControl.AdminRoleArns = [AdminRoleArn];
+
+        var ex = RefusedAtStartup(gateway, cloud, okta, "Production");
+
+        Assert.Contains("AccessControl:Enabled is false", ex.Message);
+    }
+
+    [Fact]
+    public void SL12_DevelopmentMayStillRunWithAccessControlOff()
+    {
+        var (gateway, cloud, okta) = ValidDevelopment();
+        cloud.AccessControl.Enabled = false;
+
+        StartupValidator.Validate(gateway, cloud, new FakeEnvironment("Development"), okta);
+    }
+
+    // --- SL-16: Development must stay on loopback -------------------------------------------
+
+    [Theory]
+    [InlineData("http://0.0.0.0:5000")]
+    [InlineData("http://+:5000")]
+    [InlineData("http://*:5000")]
+    [InlineData("http://10.4.1.20:5000")]
+    [InlineData("http://[::]:5000")]
+    [InlineData("https://gateway.corp.internal:443")]
+    [InlineData("http://localhost:5000;http://0.0.0.0:5001")]
+    public void SL16_DevelopmentRefusesToListenOffLoopback(string urls)
+    {
+        var (gateway, cloud, okta) = ValidDevelopment();
+
+        var ex = RefusedAtStartup(gateway, cloud, okta, "Development", urls);
+
+        Assert.Contains("reachable from the network", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("http://localhost:5000")]
+    [InlineData("http://127.0.0.1:5000;https://localhost:5001")]
+    [InlineData("http://[::1]:5000")]
+    [InlineData("https://LOCALHOST:64022/")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void SL16_LoopbackBindingsAreAccepted(string? urls)
+    {
+        var (gateway, cloud, okta) = ValidDevelopment();
+
+        StartupValidator.Validate(gateway, cloud, new FakeEnvironment("Development"), okta, urls);
+    }
+
+    [Fact]
+    public void SL16_TheLoopbackRuleIsDevelopmentOnly()
+    {
+        // Production is meant to listen on the network; it is Development's auto-granted IAM
+        // roles and disabled transport checks that must not be reachable from one.
+        var (gateway, cloud, okta) = ValidProduction();
+
+        StartupValidator.Validate(
+            gateway, cloud, new FakeEnvironment("Production"), okta, "https://0.0.0.0:443");
+    }
+
+    // --- SL-13: token inspection is not an oracle -------------------------------------------
+
+    [Fact]
+    public async Task SL13_InspectingAnExpiredTokenDisclosesNoClaims()
+    {
+        var (security, signingKeys) = TestFactory.CreateSecurityService();
+
+        var inspect = await security.InspectAppStsTokenAsync(ExpiredToken(signingKeys));
+
+        Assert.False(inspect.IsValid);
+        Assert.True(inspect.IsExpired);
+        Assert.Null(inspect.AppId);
+        Assert.Null(inspect.Scope);
+        Assert.Null(inspect.CallerId);
+        Assert.Null(inspect.IssuedAt);
+        Assert.Null(inspect.ExpiresAt);
+        Assert.False(inspect.IsAdmin);
+    }
+
+    [Fact]
+    public async Task SL13_InspectingARevokedTokenDisclosesNoClaims()
+    {
+        var (security, _) = TestFactory.CreateSecurityService();
+        var (token, _) = await security.IssueAppStsTokenAsync(
+            "victim-app", TimeSpan.FromMinutes(10), GatewayScopes.Admin, isAdmin: true);
+        var (_, payload, _) = await security.ValidateAppStsTokenAsync(token);
+        security.RevokeToken(payload!.Jti, DateTimeOffset.UtcNow.AddMinutes(10));
+
+        var inspect = await security.InspectAppStsTokenAsync(token);
+
+        Assert.False(inspect.IsValid);
+        Assert.Null(inspect.AppId);
+        Assert.Null(inspect.Scope);
+        Assert.Null(inspect.CallerId);
+        Assert.False(inspect.IsAdmin);
+    }
+
+    [Fact]
+    public async Task SL13_TheFailureReasonDoesNotSayWhichCheckFailed()
+    {
+        // Expired, revoked and forged must be indistinguishable, or the endpoint still tells an
+        // attacker whether a stolen token was ever real.
+        var (security, signingKeys) = TestFactory.CreateSecurityService();
+        var (live, _) = await security.IssueAppStsTokenAsync("a", TimeSpan.FromMinutes(10), GatewayScopes.Invoke);
+        var (revokedToken, _) = await security.IssueAppStsTokenAsync("a", TimeSpan.FromMinutes(10), GatewayScopes.Invoke);
+        var (_, revokedPayload, _) = await security.ValidateAppStsTokenAsync(revokedToken);
+        security.RevokeToken(revokedPayload!.Jti, DateTimeOffset.UtcNow.AddMinutes(10));
+
+        var expiredResult = await security.InspectAppStsTokenAsync(ExpiredToken(signingKeys, "a"));
+        var revokedResult = await security.InspectAppStsTokenAsync(revokedToken);
+        var forgedResult = await security.InspectAppStsTokenAsync(live[..^4] + "AAAA");
+
+        Assert.Equal(expiredResult.Error, forgedResult.Error);
+        Assert.Equal(expiredResult.Error, revokedResult.Error);
+    }
+
+    [Fact]
+    public async Task SL13_AValidTokenStillReportsItsOwnClaims()
+    {
+        var (security, _) = TestFactory.CreateSecurityService();
+        var (token, _) = await security.IssueAppStsTokenAsync(
+            "my-app", TimeSpan.FromMinutes(10), GatewayScopes.Invoke);
+
+        var inspect = await security.InspectAppStsTokenAsync(token);
+
+        Assert.True(inspect.IsValid);
+        Assert.Equal("my-app", inspect.AppId);
+        Assert.Null(inspect.Error);
+    }
+
+    // --- SL-17: one circuit breaker per backend, no retry of a generation POST ---------------
+
+    [Fact]
+    public void SL17_EachBackendGetsItsOwnCircuitBreaker()
+    {
+        var first = LocalProviderResilience.BuildCircuitBreaker();
+        var second = LocalProviderResilience.BuildCircuitBreaker();
+
+        Assert.NotSame(first, second);
+    }
+
+    [Theory]
+    [InlineData("GET", true)]
+    [InlineData("HEAD", true)]
+    [InlineData("OPTIONS", true)]
+    [InlineData("POST", false)]
+    [InlineData("PUT", false)]
+    [InlineData("DELETE", false)]
+    public void SL17_OnlyIdempotentRequestsAreRetried(string method, bool retryable)
+    {
+        var request = new HttpRequestMessage(new HttpMethod(method), "http://localhost:11434/api/generate");
+
+        Assert.Equal(retryable, LocalProviderResilience.IsRetryable(request));
     }
 }

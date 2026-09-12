@@ -245,11 +245,11 @@
   <header class="masthead">
     <div class="eyebrow">Security architecture · Unified LLM Gateway</div>
     <h1>How the gateway is defended, and where it still leaks</h1>
-    <p class="standfirst">Every control a request passes through, why each one is there, and the seventeen gaps a review of the design found. The four that let an outsider in — a management plane that trusted an asserted ARN, an admin-issuing Okta simulator, TLS that the installer never switched on, and unscoped break-glass tokens — are now fixed and covered by tests. Thirteen medium and low items remain.</p>
+    <p class="standfirst">Every control a request passes through, why each one is there, and the seventeen gaps a review of the design found. The four that let an outsider in — a management plane that trusted an asserted ARN, an admin-issuing Okta simulator, TLS that the installer never switched on, and unscoped break-glass tokens — are now fixed and covered by tests, along with four self-contained medium and low items. Nine remain.</p>
     <dl class="facts">
       <div class="fact"><dt>Reviewed</dt><dd>main · 57f9858</dd></div>
-      <div class="fact"><dt>Fixes</dt><dd>working tree, uncommitted</dd></div>
-      <div class="fact"><dt>Tests</dt><dd>263 passing (was 195)</dd></div>
+      <div class="fact"><dt>Fixes</dt><dd>8 of 17 · committed</dd></div>
+      <div class="fact"><dt>Tests</dt><dd>293 passing (was 195)</dd></div>
       <div class="fact"><dt>Date</dt><dd>2026-09-10</dd></div>
       <div class="fact"><dt>Deployment</dt><dd>IIS · Provider=Aws</dd></div>
     </dl>
@@ -261,14 +261,15 @@
 
     <div class="verdict">
       <p><strong>The data plane was sound; the way into the management plane was not.</strong> Application keys are 256-bit and stored only as hashes, STS tokens are signed and short-lived, and both guardrails fail closed. But in AWS mode — the mode Production runs — any caller could name the admin role in a header and be treated as it, over plain HTTP, because the installer never created an HTTPS binding. That chain is now closed at every link.</p>
+      <p>A second round then closed the four items that needed no design decision: access control can no longer be switched off outside Development, the token-inspection endpoint no longer describes tokens it rejects, a Development host must listen on loopback, and each on-prem backend has its own circuit breaker.</p>
       <p>What remains open are depth issues rather than open doors: rate limits a caller can sidestep, revocation that cannot target a single app, guardrail changes that are under-audited, routing that can send on-prem data to the cloud, backends reachable around the gateway, and an audit trail the gateway itself can delete.</p>
     </div>
 
     <div class="tally">
-      <div class="tally-cell t-closed"><span class="n">4</span><span class="lbl">Fixed</span></div>
+      <div class="tally-cell t-closed"><span class="n">8</span><span class="lbl">Fixed</span></div>
       <div class="tally-cell t-open"><span class="n">0</span><span class="lbl">Critical / high open</span></div>
-      <div class="tally-cell t-partial"><span class="n">8</span><span class="lbl">Medium open</span></div>
-      <div class="tally-cell t-low"><span class="n">5</span><span class="lbl">Low open</span></div>
+      <div class="tally-cell t-partial"><span class="n">7</span><span class="lbl">Medium open</span></div>
+      <div class="tally-cell t-low"><span class="n">2</span><span class="lbl">Low open</span></div>
     </div>
 
     <div class="table-wrap">
@@ -279,6 +280,10 @@
           <tr><td class="id"><span class="sev sev-high"></span>SL-02</td><td>The Okta simulator, with a hard-coded admin, ran in any environment that did not switch it off.</td><td>Off by default; refused at startup outside Development and not mapped there.</td><td><span class="chip c-closed">Fixed</span></td></tr>
           <tr><td class="id"><span class="sev sev-high"></span>SL-03</td><td>The IIS installer created an HTTP-only site, so "mandatory TLS" did nothing. Test was exempt despite being networked.</td><td>HTTPS-only binding; API calls over HTTP refused with <code>HTTPS_REQUIRED</code>; only Development exempt.</td><td><span class="chip c-closed">Fixed</span></td></tr>
           <tr><td class="id"><span class="sev sev-high"></span>SL-04</td><td>Admin STS tokens skipped scope on <code>/api</code>, chose their own identity, and were minted with no audit record.</td><td>Admin scope required; break-glass acts as a configured principal; every mint audited and alerted; 15-minute cap.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-12</td><td><code>AccessControl:Enabled: false</code> passed validation as long as one admin ARN was listed, making every authenticated principal a full administrator.</td><td>The switch itself is refused outside Development; listing ARNs no longer excuses it.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-13</td><td><code>/gateway/sts/inspect</code> returned the claims of any signed token, expired or revoked included — an oracle for testing a stolen credential. <code>/status</code> disclosed the version.</td><td>A rejected token yields only "not valid" and whether it expired, identically for expired, revoked and forged, and the rejection is logged. <code>/status</code> reports liveness only.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-16</td><td>Development auto-grants every IAM role and skips the transport checks, yet nothing stopped a Development host listening on the network.</td><td>Startup refuses any non-loopback binding in Development.</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-17</td><td>One circuit breaker was shared by all three on-prem backends, and generation POSTs were retried after a timeout.</td><td>A breaker per backend; retries restricted to idempotent requests.</td><td><span class="chip c-closed">Fixed</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -576,11 +581,11 @@ flowchart TD
     POL -- allow --> ALLOW["Handler runs · A2 audit record&lt;br/&gt;principal · auth type · token id"]
     NOROLE --> R403
 
-    G12["SL-12 access control off makes&lt;br/&gt;every authenticated caller admin"]:::gap -.- EN
+    F12["SL-12 fixed · AccessControl:Enabled false&lt;br/&gt;is refused at startup outside Development"]:::fixed -.- EN
 
     classDef gap fill:#fde2e1,stroke:#c0392b,color:#7b1d15
     classDef fixed fill:#dff1e6,stroke:#2c6449,color:#173d2a
-    class VER,STSV,BG,SIM fixed
+    class VER,STSV,BG,SIM,F12 fixed
 </pre>
       </div>
       <figcaption>Every branch that ends in a principal outside Development is a cryptographic proof: STS, an Okta RS256 signature, the gateway's own HMAC, or a constant-time key comparison.</figcaption>
@@ -633,9 +638,10 @@ flowchart LR
     D --> X2["401 Unrecognised credential&lt;br/&gt;SL-01 fixed"]
     A -. "signs in to a leftover Okta simulator" .-> X3["Simulator refused at startup&lt;br/&gt;and not mapped · SL-02 fixed"]
     A -. "replays a break-glass token scoped read" .-> X4["401 scope does not permit&lt;br/&gt;management · SL-04 fixed"]
+    A -. "probes a stolen token at /sts/inspect" .-> X5["Only 'not valid' · no claims,&lt;br/&gt;same answer for forged · SL-13 fixed"]
 
     classDef blocked fill:#dff1e6,stroke:#2c6449,color:#173d2a
-    class X1,X2,X3,X4 blocked
+    class X1,X2,X3,X4,X5 blocked
 </pre>
       </div>
       <figcaption>Before the fixes, every step succeeded: anyone who could reach the port held the management plane in Production and Test, over plain HTTP.</figcaption>
@@ -683,7 +689,7 @@ flowchart LR
         <thead><tr><th>ID</th><th>Control</th><th>Why it is needed</th><th>Status</th></tr></thead>
         <tbody>
           <tr><td class="id">Z1</td><td>Deny-by-default on the whole <code>/api</code> group<span class="where"><a href="../Endpoints/DashboardEndpoints.cs#L72-L75">DashboardEndpoints.cs</a></span></td><td>A new endpoint cannot ship unguarded.</td><td><span class="chip c-closed">Implemented</span></td></tr>
-          <tr><td class="id">Z2</td><td>Per-action IAM policy: explicit Deny, then Allow, else implicit deny; engine errors deny<span class="where"><a href="../Auth/GatewayAuthentication.cs">GatewayAuthentication.cs</a> · <a href="../Services/Cloud/Aws/AwsProviders.cs#L195-L346">AwsProviders.cs</a></span></td><td>Least privilege: Auditor reads, AppOwner creates, only PlatformAdmin changes guardrails.</td><td><span class="chip c-partial">Partial · SL-12</span></td></tr>
+          <tr><td class="id">Z2</td><td>Per-action IAM policy: explicit Deny, then Allow, else implicit deny; engine errors deny<span class="where"><a href="../Auth/GatewayAuthentication.cs">GatewayAuthentication.cs</a> · <a href="../Services/Cloud/Aws/AwsProviders.cs#L195-L346">AwsProviders.cs</a></span></td><td>Least privilege: Auditor reads, AppOwner creates, only PlatformAdmin changes guardrails.</td><td><span class="chip c-closed">Implemented</span></td></tr>
           <tr><td class="id">Z3</td><td>App isolation: token <code>appId</code> must match the route; master key is not an app credential<span class="where"><a href="../Services/ApplicationRegistryService.cs#L382-L415">ApplicationRegistryService.cs</a></span></td><td>One tenant cannot invoke another's app, prompt or budget.</td><td><span class="chip c-closed">Implemented</span></td></tr>
           <tr><td class="id">Z4</td><td>Scope enforcement: <code>read</code> cannot invoke; only <code>admin</code> can manage<span class="where"><a href="../Services/ApplicationRegistryService.cs#L391-L397">ApplicationRegistryService.cs</a> · <a href="../Auth/GatewayAuthentication.cs#L171">GatewayAuthentication.cs</a></span></td><td>An advertised restriction must be enforced.</td><td><span class="chip c-closed">Implemented</span></td></tr>
           <tr><td class="id">Z5</td><td>Universal endpoint limited to admins<span class="where"><a href="../Endpoints/GatewayEndpoints.cs">GatewayEndpoints.cs</a></span></td><td>Choosing model, provider and system prompt is privileged.</td><td><span class="chip c-closed">Implemented</span></td></tr>
@@ -718,10 +724,10 @@ flowchart LR
           <tr><td class="id">A1</td><td>Invocation record with actor, auth type, <code>jti</code>, IP, traceId, tokens, cost; <code>callerId</code> kept as a label, never the identity<span class="where"><a href="../Services/ModelRouter.cs#L405-L446">ModelRouter.cs</a> · <a href="../Models/CallerContext.cs">CallerContext.cs</a></span></td><td>Non-repudiation, chargeback, forensics.</td><td><span class="chip c-closed">Implemented</span></td></tr>
           <tr><td class="id">A2</td><td>A record for every privileged action and every token issuance, break-glass mints included, with the token id<span class="where"><a href="../Endpoints/DashboardEndpoints.cs#L14-L26">DashboardEndpoints.cs</a> · <a href="../Services/ApplicationRegistryService.cs#L478">ApplicationRegistryService.cs</a></span></td><td>Privileged changes and credential issuance must name an actor and source.</td><td><span class="chip c-partial">Partial · SL-07</span></td></tr>
           <tr><td class="id">A3</td><td>Durable, date-partitioned audit store in S3<span class="where"><a href="../Services/Telemetry/S3AuditStore.cs">S3AuditStore.cs</a></span></td><td>The trail survives loss of the host.</td><td><span class="chip c-partial">Partial · SL-11</span></td></tr>
-          <tr><td class="id">S1</td><td><code>StartupValidator</code> refuses insecure config outside Development: default keys, auth off, wildcard CORS, HTTP, long TTLs, either simulator, the Okta simulator, placeholders, no break-glass principal, loosely scoped AWS identity<span class="where"><a href="../Startup/StartupValidator.cs">StartupValidator.cs</a></span></td><td>A misconfiguration fails the deploy instead of running quietly insecure.</td><td><span class="chip c-partial">Partial · SL-12</span></td></tr>
+          <tr><td class="id">S1</td><td><code>StartupValidator</code> refuses insecure config outside Development: default keys, auth off, access control off, wildcard CORS, HTTP, long TTLs, either simulator, the Okta simulator, placeholders, no break-glass principal, loosely scoped AWS identity — and in Development, any binding that is not loopback<span class="where"><a href="../Startup/StartupValidator.cs">StartupValidator.cs</a></span></td><td>A misconfiguration fails the deploy instead of running quietly insecure.</td><td><span class="chip c-closed">Implemented</span></td></tr>
           <tr><td class="id">S2</td><td>Swagger in Development only<span class="where"><a href="../Program.cs">Program.cs</a></span></td><td>No free map of the management surface.</td><td><span class="chip c-closed">Implemented</span></td></tr>
           <tr><td class="id">S3</td><td><code>NuGetAudit</code>, locked restore, CodeQL, gitleaks<span class="where"><a href="../.github/workflows/ci.yml">ci.yml</a></span></td><td>Vulnerable dependencies and committed secrets fail the PR.</td><td><span class="chip c-closed">Implemented</span></td></tr>
-          <tr><td class="id">S4</td><td>Retry, circuit breaker and fallback on providers<span class="where"><a href="../Program.cs#L167-L191">Program.cs</a> · <a href="../Services/ModelRouter.cs#L228-L294">ModelRouter.cs</a></span></td><td>Availability for every tenant.</td><td><span class="chip c-partial">Partial · SL-09, SL-17</span></td></tr>
+          <tr><td class="id">S4</td><td>Retry, circuit breaker and fallback on providers — one breaker per backend, retries only for idempotent requests<span class="where"><a href="../Startup/LocalProviderResilience.cs">LocalProviderResilience.cs</a> · <a href="../Services/ModelRouter.cs#L228-L294">ModelRouter.cs</a></span></td><td>Availability for every tenant; one dead backend does not take out the others.</td><td><span class="chip c-partial">Partial · SL-09</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -746,12 +752,12 @@ flowchart LR
           <tr><td class="id"><span class="sev sev-med"></span>SL-09</td><td>Routing fails open to the cloud</td><td><span class="chip c-open">Open</span></td></tr>
           <tr><td class="id"><span class="sev sev-med"></span>SL-10</td><td>On-prem model servers can be called around the gateway</td><td><span class="chip c-open">Open</span></td></tr>
           <tr><td class="id"><span class="sev sev-med"></span>SL-11</td><td>The audit trail can be erased by the principal it audits</td><td><span class="chip c-open">Open</span></td></tr>
-          <tr><td class="id"><span class="sev sev-med"></span>SL-12</td><td>Disabling access control passes startup validation</td><td><span class="chip c-open">Open</span></td></tr>
-          <tr><td class="id"><span class="sev sev-low"></span>SL-13</td><td>Unauthenticated metadata endpoints</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-med"></span>SL-12</td><td>Disabling access control passes startup validation</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-13</td><td>Unauthenticated metadata endpoints</td><td><span class="chip c-closed">Fixed</span></td></tr>
           <tr><td class="id"><span class="sev sev-low"></span>SL-14</td><td>Registry and system prompts are plaintext on the web host</td><td><span class="chip c-open">Open</span></td></tr>
           <tr><td class="id"><span class="sev sev-low"></span>SL-15</td><td>Documentation contradicts the code</td><td><span class="chip c-partial">Partly reconciled</span></td></tr>
-          <tr><td class="id"><span class="sev sev-low"></span>SL-16</td><td>Development profile is an open admin plane with real Bedrock spend</td><td><span class="chip c-open">Open</span></td></tr>
-          <tr><td class="id"><span class="sev sev-low"></span>SL-17</td><td>One circuit breaker shared by every local backend</td><td><span class="chip c-open">Open</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-16</td><td>Development profile is an open admin plane with real Bedrock spend</td><td><span class="chip c-closed">Fixed</span></td></tr>
+          <tr><td class="id"><span class="sev sev-low"></span>SL-17</td><td>One circuit breaker shared by every local backend</td><td><span class="chip c-closed">Fixed</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -832,6 +838,62 @@ flowchart LR
       </article>
     </div>
 
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-12 · MEDIUM</span>
+          <p class="i-title">Disabling access control passes startup validation</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../Startup/StartupValidator.cs">StartupValidator.cs</a> · <a href="../Auth/GatewayAuthentication.cs#L320-L335">GatewayAuthentication.cs</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd>With <code>AccessControl:Enabled: false</code> every authenticated principal is authorized. The validator refused this only when no admin ARN was listed, so one ARN plus a disabled engine started, and every Okta Developer became an admin. Listing ARNs was never a mitigation: the authorization handler does not consult them while the switch is off. (The placeholder-account half was fixed under SL-04.)</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>The switch itself is the failure. Outside Development <code>Enabled: false</code> is refused at startup whatever <code>AdminRoleArns</code> holds. Development may still run with it off, since the local IAM simulator grants everything regardless.</dd></div>
+          <div class="i-row"><dt>Proof</dt><dd>Refused in Production, Staging and Test; still refused when an admin ARN is listed; accepted in Development.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-13 · LOW</span>
+          <p class="i-title">Unauthenticated metadata endpoints</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../Services/SecurityService.cs">SecurityService.cs</a> · <a href="../Program.cs">Program.cs</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd><code>/gateway/sts/inspect</code> returned the claims of any validly signed token, expired or revoked included — an oracle for testing a stolen token outside the invoke audit. <code>/status</code> disclosed the version and framework.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>A token that does not validate returns <code>isValid: false</code>, whether it had expired, and nothing else — no app id, scope, caller id or timestamps. The message is identical for expired, revoked and forged, so the endpoint cannot say which, and every rejection is logged at Warning. A token that validates still reports its own claims, which its holder already has. <code>/status</code> reports liveness only.</dd></div>
+          <div class="i-row"><dt>Proof</dt><dd>Expired and revoked tokens disclose no claims; expired, revoked and forged return the same message; a valid token still reports its app id.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-16 · LOW</span>
+          <p class="i-title">Development profile is an open admin plane with real Bedrock spend</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../Startup/StartupValidator.cs">StartupValidator.cs</a> · <a href="../Program.cs">Program.cs</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd>In Development, IamLocal auto-creates any role that is asked for with <code>Allow */*</code>, while Bedrock calls go to real AWS on the developer's profile — and Development is the one environment exempt from the HTTPS and app-authentication rules. <code>launchSettings.json</code> binds to localhost, but nothing held a Development host to that: an <code>ASPNETCORE_URLS</code> of <code>http://0.0.0.0:5000</code> started happily.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd>The validator reads the host's URL list — where <code>ASPNETCORE_URLS</code>, <code>--urls</code> and <code>applicationUrl</code> all land — and refuses to start in Development if any binding is not loopback. Kestrel's wildcards (<code>*</code>, <code>+</code>, <code>0.0.0.0</code>, <code>[::]</code>) all count as network bindings. The rule is Development-only; other environments are meant to be reachable.</dd></div>
+          <div class="i-row"><dt>Proof</dt><dd>Each wildcard form, a LAN address, a hostname and a mixed list are refused; <code>localhost</code>, <code>127.0.0.1</code>, <code>[::1]</code> and an empty list are accepted; Production may still bind <code>0.0.0.0</code>.</dd></div>
+        </dl>
+      </article>
+
+      <article class="item i-closed">
+        <div class="i-head">
+          <span class="i-id">SL-17 · LOW</span>
+          <p class="i-title">One circuit breaker shared by every local backend</p>
+          <span class="chip c-closed">Fixed</span>
+          <div class="i-loc"><a href="../Startup/LocalProviderResilience.cs">LocalProviderResilience.cs</a> · <a href="../Program.cs">Program.cs</a></div>
+        </div>
+        <dl class="i-body">
+          <div class="i-row"><dt>Was</dt><dd>One <code>CircuitBreakerAsync</code> instance was shared by all three local clients, so five failures from a dead Ollama opened the circuit for LM Studio and llama.cpp as well. Generation POSTs were retried on timeout — and a generation that timed out may have reached the model and still be running, so the retry burns a second generation, bills the application twice and can return the slower of two answers.</dd></div>
+          <div class="i-row"><dt>Fix</dt><dd><code>LocalProviderResilience</code> builds a fresh breaker per named client, and the retry policy is chosen per request: applied to <code>GET</code>, <code>HEAD</code> and <code>OPTIONS</code>, replaced by a no-op for everything else.</dd></div>
+          <div class="i-row"><dt>Proof</dt><dd>Two calls to the breaker factory return distinct instances; <code>GET</code>, <code>HEAD</code> and <code>OPTIONS</code> are retryable while <code>POST</code>, <code>PUT</code> and <code>DELETE</code> are not.</dd></div>
+        </dl>
+      </article>
+
     <h3>Open</h3>
     <div class="items">
 
@@ -898,21 +960,6 @@ flowchart LR
         </dl>
       </article>
 
-      <article class="item i-medium">
-        <div class="i-head"><span class="i-id">SL-12 · MEDIUM</span><p class="i-title">Disabling access control passes startup validation</p>
-          <div class="i-loc"><a href="../Auth/GatewayAuthentication.cs#L320-L335">GatewayAuthentication.cs:320</a> · <a href="../Startup/StartupValidator.cs#L115-L120">StartupValidator.cs:115</a></div></div>
-        <dl class="i-body">
-          <div class="i-row"><dt>What</dt><dd>With <code>AccessControl:Enabled: false</code> every authenticated principal is authorized; the validator refuses this only when no admin ARN is listed, so one ARN plus a disabled engine starts, and every Okta Developer is an admin. (The placeholder-account half was fixed under SL-04.)</dd></div>
-          <div class="i-row"><dt>Fix</dt><dd>Refuse <code>Enabled: false</code> outside Development outright.</dd></div>
-        </dl>
-      </article>
-
-      <article class="item i-low">
-        <div class="i-head"><span class="i-id">SL-13 · LOW</span><p class="i-title">Unauthenticated metadata endpoints</p>
-          <div class="i-loc"><a href="../Endpoints/GatewayEndpoints.cs#L79-L101">GatewayEndpoints.cs:79</a> · <a href="../Program.cs#L472-L478">Program.cs:472</a></div></div>
-        <dl class="i-body"><div class="i-row"><dt>What</dt><dd><code>/gateway/sts/inspect</code> returns the claims of any validly signed token, expired or revoked included — an oracle for testing a stolen token outside the invoke audit. <code>/status</code> discloses the version. <strong>Fix:</strong> return only validity and expiry, or require authentication.</dd></div></dl>
-      </article>
-
       <article class="item i-low">
         <div class="i-head"><span class="i-id">SL-14 · LOW</span><p class="i-title">Registry and system prompts are plaintext on the web host</p>
           <div class="i-loc"><a href="../Services/ApplicationRegistryService.cs#L719-L771">ApplicationRegistryService.cs:719</a></div></div>
@@ -925,18 +972,7 @@ flowchart LR
         <dl class="i-body"><div class="i-row"><dt>What</dt><dd>The sign-off table and installer now match the code. <code>architecture.md</code> §1.1/§2 still describe Data Protection, a container sandbox, Kubernetes and TLS 1.3; the README still calls <code>/api</code> unauthenticated. <strong>Fix:</strong> reconcile, citing code per claim.</dd></div></dl>
       </article>
 
-      <article class="item i-low">
-        <div class="i-head"><span class="i-id">SL-16 · LOW</span><p class="i-title">Development profile is an open admin plane with real Bedrock spend</p>
-          <div class="i-loc"><a href="../appsettings.Development.json#L120">appsettings.Development.json:120</a> · <a href="../Services/Cloud/LocalDotNet/LocalDotNetProviders.cs#L291-L319">LocalDotNetProviders.cs:291</a></div></div>
-        <dl class="i-body"><div class="i-row"><dt>What</dt><dd>IamLocal auto-creates any role with <code>Allow */*</code> while Bedrock calls reach real AWS; safe only while bound to localhost. <strong>Fix:</strong> refuse non-loopback URLs in Development.</dd></div></dl>
-      </article>
-
-      <article class="item i-low">
-        <div class="i-head"><span class="i-id">SL-17 · LOW</span><p class="i-title">One circuit breaker shared by every local backend</p>
-          <div class="i-loc"><a href="../Program.cs#L167-L191">Program.cs:167</a></div></div>
-        <dl class="i-body"><div class="i-row"><dt>What</dt><dd>One breaker for three backends, and generation POSTs are retried. <strong>Fix:</strong> a policy per client; no retry of generation on timeout.</dd></div></dl>
-      </article>
-    </div>
+                </div>
   </section>
 
   <!-- ===================================================================== -->
@@ -945,7 +981,7 @@ flowchart LR
     <div class="phases">
       <div class="phase">
         <div class="phase-tag"><span class="p-n">Done</span><span class="p-l">this change</span></div>
-        <div class="phase-body"><p><strong>SL-01 · SL-02 · SL-03 · SL-04.</strong> 68 new tests in <code>SecurityLoopTests</code> and <code>ShippedConfigurationTests</code>; 263 passing in total.</p></div>
+        <div class="phase-body"><p><strong>SL-01 · SL-02 · SL-03 · SL-04 · SL-12 · SL-13 · SL-16 · SL-17.</strong> 98 new tests in <code>SecurityLoopTests</code> and <code>ShippedConfigurationTests</code>; 293 passing in total.</p></div>
       </div>
       <div class="phase">
         <div class="phase-tag"><span class="p-n">Before production</span><span class="p-l">days</span></div>
@@ -953,11 +989,11 @@ flowchart LR
       </div>
       <div class="phase">
         <div class="phase-tag"><span class="p-n">Next sprint</span><span class="p-l">2–4 weeks</span></div>
-        <div class="phase-body"><p><strong>SL-05 · SL-06 · SL-07 · SL-09 · SL-11 · SL-12.</strong> Proof: distinct random keys from one IP draw 429s; an old app token dies on key rotation; a detector change leaves a diff in the audit; an unknown provider is a 400; the gateway role has no <code>s3:DeleteObject</code>; disabled access control refuses to start.</p></div>
+        <div class="phase-body"><p><strong>SL-05 · SL-06 · SL-07 · SL-09 · SL-11.</strong> Proof: distinct random keys from one IP draw 429s; an old app token dies on key rotation; a detector change leaves a diff in the audit; an unknown provider is a 400; the gateway role has no <code>s3:DeleteObject</code>.</p></div>
       </div>
       <div class="phase">
         <div class="phase-tag"><span class="p-n">Planned</span><span class="p-l">ongoing</span></div>
-        <div class="phase-body"><p><strong>SL-08 · SL-10 · SL-13 – SL-17</strong>, then an external penetration test covering the management plane, alongside the items already open in <code>architecture.md</code>: per-app ownership, asymmetric KMS signing, a database registry, SIEM export and token budgets.</p></div>
+        <div class="phase-body"><p><strong>SL-08 · SL-10 · SL-14 · SL-15</strong>, then an external penetration test covering the management plane, alongside the items already open in <code>architecture.md</code>: per-app ownership, asymmetric KMS signing, a database registry, SIEM export and token budgets.</p></div>
       </div>
     </div>
   </section>

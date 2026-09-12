@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -249,12 +249,22 @@ public class SecurityService : ISecurityService
     {
         var (isValid, payload, failureReason) = await ValidateAppStsTokenAsync(token, cancellationToken);
 
-        if (payload is null)
+        // A token that does not validate discloses nothing. The endpoint is unauthenticated:
+        // returning the claims of an expired or revoked token turns it into an oracle for
+        // testing a stolen credential -- one that never reaches the invoke audit (SL-13).
+        // Legitimate clients need only enough to decide whether to mint a fresh token.
+        if (!isValid || payload is null)
         {
+            _logger.LogWarning(
+                "STS token inspection rejected: {Reason}.",
+                failureReason ?? "invalid token");
+
             return new AppStsInspectResponse
             {
                 IsValid = false,
-                Error = failureReason ?? "Invalid token"
+                IsExpired = payload is not null &&
+                            DateTimeOffset.UtcNow > DateTimeOffset.FromUnixTimeSeconds(payload.ExpiresAtUnix),
+                Error = "Token is not valid. Request a new one."
             };
         }
 
@@ -272,8 +282,7 @@ public class SecurityService : ISecurityService
             ExpiresInSeconds = Math.Round(Math.Max(0, (expiresAt - now).TotalSeconds), 1),
             IsExpired = now > expiresAt,
             Scope = payload.Scope,
-            CallerId = payload.CallerId,
-            Error = isValid ? null : failureReason
+            CallerId = payload.CallerId
         };
     }
 

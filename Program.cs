@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.OpenApi.Models;
 using Polly;
-using Polly.Extensions.Http;
 using UnifiedGateway.Auth;
 using UnifiedGateway.Endpoints;
 using UnifiedGateway.Models;
@@ -45,7 +44,14 @@ var oktaOptions = builder.Configuration
     .Get<OktaOptions>() ?? new OktaOptions();
 
 // Refuse to start on an insecure configuration rather than starting insecure.
-StartupValidator.Validate(gatewayOptions, cloudOptions, builder.Environment, oktaOptions);
+// "urls" is where the host lands ASPNETCORE_URLS, --urls and launchSettings' applicationUrl,
+// so the validator sees what this process will actually listen on.
+StartupValidator.Validate(
+    gatewayOptions,
+    cloudOptions,
+    builder.Environment,
+    oktaOptions,
+    builder.Configuration["urls"]);
 
 // ---------------------------------------------------------------------------
 // 2. Cloud provider binding — the single switch between TEST and PROD
@@ -164,25 +170,22 @@ builder.Services.AddSingleton(_ =>
 // ---------------------------------------------------------------------------
 // 3. Resilient HttpClientFactory for local model providers
 // ---------------------------------------------------------------------------
-var retryPolicy = HttpPolicyExtensions
-    .HandleTransientHttpError()
-    .Or<TimeoutException>()
-    .WaitAndRetryAsync(2, attempt => TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt)));
-
-var circuitBreaker = HttpPolicyExtensions
-    .HandleTransientHttpError()
-    .CircuitBreakerAsync(
-        handledEventsAllowedBeforeBreaking: 5,
-        durationOfBreak: TimeSpan.FromSeconds(30));
+// Retry and breaker policy lives in LocalProviderResilience so the two rules it encodes --
+// a breaker per backend, and no retry of a generation POST -- are unit-testable (SL-17).
+var retryPolicy = LocalProviderResilience.BuildRetryPolicy();
+var noRetryPolicy = Policy.NoOpAsync<HttpResponseMessage>();
 
 void AddLocalProviderClient(string name, string baseUrl, int timeoutSeconds)
 {
+    var circuitBreaker = LocalProviderResilience.BuildCircuitBreaker();
+
     builder.Services.AddHttpClient(name, client =>
     {
         client.BaseAddress = new Uri(baseUrl);
         client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
     })
-    .AddPolicyHandler(retryPolicy)
+    .AddPolicyHandler(request =>
+        LocalProviderResilience.IsRetryable(request) ? retryPolicy : noRetryPolicy)
     .AddPolicyHandler(circuitBreaker);
 }
 
@@ -469,11 +472,11 @@ if (oktaOptions.Enabled && app.Environment.IsDevelopment())
     app.MapOktaSimulatorEndpoints();
 }
 
+// Unauthenticated liveness probe. It says the process is up and nothing else: a version
+// and framework string tells an attacker which advisories to read against this host (SL-13).
 app.MapGet("/status", () => Results.Ok(new
 {
     name = "Universal AI LLM Gateway",
-    version = "2.0.0",
-    framework = ".NET 8 Minimal API",
     status = "Online"
 }));
 
