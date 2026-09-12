@@ -24,7 +24,9 @@ Development runs against [`DOTNET_AWS_SIMULATOR`](../../../workspace/Projects/DO
 
 Going to real AWS is: flip `Provider` to `Aws`, drop the `LocalDotNet` block, point `Crypto.KeyId` at a real alias. No code changes — `StartupValidator` refuses `LocalDotNet`, and the Python `Simulator` provider, anywhere but Development, so the switch cannot be forgotten. Both simulators accept a bare role name as proof of identity, which is fine on a developer's loopback and nowhere else (SL-01 and SL-03 in [security-architecture-flow.md](security-architecture-flow.md)).
 
-A real environment also refuses to start until its template placeholders are substituted: the Roles Anywhere ARNs and thumbprint, the break-glass principal (`Gateway:Cloud:AccessControl:BreakGlassPrincipalArn`), and the Okta tenant URLs and role mappings.
+A real environment also refuses to start until its template placeholders are substituted: the Roles Anywhere ARNs and thumbprint, the break-glass principal (`Gateway:Cloud:AccessControl:BreakGlassPrincipalArn`), and the Okta tenant URLs and role mappings. It also refuses `Gateway:Cloud:AccessControl:Enabled: false` outright, since with the engine off every authenticated caller is a full administrator whatever `AdminRoleArns` lists (SL-12).
+
+**Development must bind loopback.** IamLocal creates any role that is asked for with `Allow */*`, Bedrock calls go to real AWS on your own profile, and Development is the one environment exempt from the HTTPS and app-key rules — so a Development host on the network is an open admin plane attached to a live spend account. Startup refuses any non-loopback binding there, including `0.0.0.0`, `*`, `+` and `[::]`. `launchSettings.json` already binds localhost; if you set `ASPNETCORE_URLS` yourself, keep it on `localhost`, `127.0.0.1` or `[::1]`, and run a shared host under a different environment name (SL-16).
 
 ---
 

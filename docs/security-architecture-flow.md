@@ -7,7 +7,7 @@ Prepared for the security team: what the gateway protects, how a request moves t
 | | |
 | :--- | :--- |
 | **Target** | `UnifiedGatewayV2` · branch `main` · reviewed at commit `57f9858` |
-| **Remediation** | Round 1: SL-01 to SL-04 · Round 2: SL-12, SL-13, SL-16, SL-17 · all committed · 293 tests passing, up from 195 |
+| **Remediation** | Round 1: SL-01 to SL-04 · Round 2: SL-12, SL-13, SL-15, SL-16, SL-17 · all committed · 293 tests passing, up from 195 |
 | **Date** | 2026-09-10 |
 | **Method** | Static review of source, configuration and deployment scripts. Guardrail bypass inputs were run against the shipped regex patterns on the .NET regex engine. The fixes are covered by unit tests. Nothing was deployed or exploited. |
 | **Deployment assumed** | Windows Server + IIS in-process, `ASPNETCORE_ENVIRONMENT=Production`, `Gateway:Cloud:Provider=Aws` |
@@ -22,7 +22,7 @@ The gateway sits between internal applications and large language models — AWS
 - **Data plane** (`/gateway/*`). Applications invoke models with an API key or a short-lived STS token. Every prompt and every response passes through a guardrail.
 - **Management plane** (`/api/*`). Operators register applications, mint and rotate credentials, change guardrail policy and read billing. Every endpoint requires authentication plus a named IAM action.
 
-The review found **17 security loops**. Eight are now fixed. The four that let an outsider in went first:
+The review found **17 security loops**. Nine are now fixed. The four that let an outsider in went first:
 
 | ID | Was | Now |
 | :--- | :--- | :--- |
@@ -31,16 +31,17 @@ The review found **17 security loops**. Eight are now fixed. The four that let a
 | **SL-03** · High | The IIS installer created an HTTP-only site, so "mandatory TLS" did nothing. Test was exempt despite being networked. | HTTPS-only binding. API calls over HTTP are refused with `HTTPS_REQUIRED`. Only Development is exempt. |
 | **SL-04** · High | Admin STS tokens skipped scope checks on `/api`, chose their own identity, and were minted without an audit record. | Admin scope required. Break-glass acts as a configured principal. Every mint is audited and alerted, and admin tokens live at most 15 minutes. |
 
-A second round then closed the four that were self-contained — a validator rule, an endpoint's response shape, and a resilience policy:
+A second round then closed five more — a validator rule, an endpoint's response shape, a resilience policy, and the documentation drift:
 
 | ID | Was | Now |
 | :--- | :--- | :--- |
 | **SL-12** · Medium | `AccessControl:Enabled: false` passed startup validation as long as one admin ARN was listed, which made every authenticated principal — every Okta Developer — a full administrator. | The switch itself is refused outside Development. Listing ARNs no longer excuses it. |
 | **SL-13** · Low | `/gateway/sts/inspect` returned the claims of any correctly signed token, expired or revoked ones included, giving an oracle for testing a stolen credential outside the invoke audit. `/status` disclosed the version. | A token that does not validate returns only "not valid" and whether it expired — no app, scope, caller or timestamps, and the same message whether it was expired, revoked or forged. Each rejection is logged. `/status` reports liveness only. |
+| **SL-15** · Low | `architecture.md` described ASP.NET Data Protection, an Alpine container sandbox, a Kubernetes ingress and TLS 1.3, none of which exist; the README advertised `/api` as unauthenticated and Roles Anywhere as not implemented, and its installer command predated the HTTPS-only binding. | Both reconciled against the code, with the implementing file cited per claim, and the open findings named where a control is only partial. |
 | **SL-16** · Low | Development auto-grants every IAM role with `Allow */*` and disables the transport checks, yet nothing stopped a Development host from listening on the network. | Startup refuses any non-loopback binding in Development. |
 | **SL-17** · Low | One circuit breaker instance was shared by Ollama, LM Studio and llama.cpp, so one dead backend opened the circuit for all three, and generation POSTs were retried after a timeout. | A breaker per backend, and retries restricted to idempotent requests. |
 
-**9 loops remain open: 7 medium and 2 low, no critical or high.** None of them lets an unauthenticated caller in. They concern:
+**8 loops remain open: 7 medium and 1 low, no critical or high.** None of them lets an unauthenticated caller in. They concern:
 - rate-limit evasion
 - revocation granularity
 - guardrail weakening and evasion
@@ -48,7 +49,6 @@ A second round then closed the four that were self-contained — a validator rul
 - on-prem model servers reachable around the gateway
 - audit-trail integrity
 - registry confidentiality at rest
-- documentation drift
 
 Section 6 gives the order.
 
@@ -468,7 +468,7 @@ Status key: **Implemented** — present and correct as far as review and tests s
 | [SL-12](#sl-12--disabling-access-control-passes-startup-validation) | Medium | Disabling access control passes startup validation | **Fixed** |
 | [SL-13](#sl-13--unauthenticated-metadata-endpoints) | Low | Unauthenticated metadata endpoints | **Fixed** |
 | [SL-14](#sl-14--registry-and-system-prompts-are-plaintext-on-the-web-host) | Low | Registry and system prompts are plaintext on the web host | Open |
-| [SL-15](#sl-15--documentation-contradicts-the-code) | Low | Documentation contradicts the code | Open (partly reconciled) |
+| [SL-15](#sl-15--documentation-contradicts-the-code) | Low | Documentation contradicts the code | **Fixed** |
 | [SL-16](#sl-16--development-profile-is-an-open-admin-plane-with-real-bedrock-spend) | Low | Development profile is an open admin plane with real Bedrock spend | **Fixed** |
 | [SL-17](#sl-17--one-circuit-breaker-shared-by-every-local-backend) | Low | One circuit breaker shared by every local backend | **Fixed** |
 
@@ -662,13 +662,21 @@ The registry is plain JSON under the site root, with a `.bak` copy, holding key 
 
 ### SL-15 — Documentation contradicts the code
 
-**Low · Open (partly reconciled)** · [`architecture.md`](../architecture.md) §1.1, §2 · [`README.md:92-106`](../README.md#L92-L106)
+**Low · Fixed** · [`architecture.md`](../architecture.md) · [`README.md`](../README.md) · [`hardening-implementation.md`](hardening-implementation.md) · [`dev-environment.md`](dev-environment.md)
 
-The `architecture.md` sign-off table and the installer are now consistent with the code. What remains:
-- `architecture.md` §1.1 and the §2 diagram still describe Data Protection encryption, a container sandbox, a Kubernetes ingress and TLS 1.3.
-- The README still says `/api` is unauthenticated and Roles Anywhere is not implemented.
+**Was.** Documentation described a system that was never built, and in one place advertised a hole that no longer existed:
+- `architecture.md` §1.1 and the §2 diagram described ASP.NET Data Protection encryption, non-root Alpine container sandboxing, a Kubernetes ingress and TLS 1.3 — none of which exist in an IIS in-process deployment whose Data Protection was deliberately removed.
+- The README called the `/api` group **unauthenticated**, listed IAM Roles Anywhere and the security headers as not implemented, told the reader to add an HTTPS binding by hand, and gave an installer command (`-Port 8080`) that no longer runs.
 
-**Fix:** reconcile both, citing the implementing code.
+A reader planning a deployment would have mis-scoped the network controls, and a reader auditing it would have gone looking for a container that does not exist.
+
+**Fix.** Both reconciled against the code with the implementing file cited per claim, and partial controls named as partial with their open finding:
+- `architecture.md`: objectives 5 and 6 rewritten; the trust-boundary diagram now shows the IIS HTTPS-only binding, Secrets Manager and KMS instead of a Kubernetes ingress and a Data Protection key ring, and the registry as plaintext (SL-14); the sign-off table gains rows for access control, unauthenticated-endpoint disclosure, Development loopback, registry encryption, on-prem reachability and audit-trail integrity; rate limiting is downgraded to **Partial** for SL-05.
+- `README.md`: the "known gap" replaced with what the management plane actually requires; the IIS instructions rewritten around `-CertificateThumbprint`; examples moved to HTTPS; the Data Protection key-ring claim replaced with the secret store; the Development loopback rule stated.
+- `hardening-implementation.md`: the later-changes banner now lists all eight fixes, a "closed after delivery" table records the second round, and the nine — now eight — remaining findings are named.
+- `dev-environment.md`: the loopback rule and the access-control rule stated where a developer will hit them.
+
+**Residual.** This is a point-in-time reconciliation; nothing enforces it. A doc test that asserts each cited file and symbol still exists would keep it true.
 
 ### SL-16 — Development profile is an open admin plane with real Bedrock spend
 
@@ -696,10 +704,10 @@ The `architecture.md` sign-off table and the installer are now consistent with t
 
 | When | Loops | Test that proves the fix |
 | :--- | :--- | :--- |
-| **Done** | SL-01 · SL-02 · SL-03 · SL-04 · SL-12 · SL-13 · SL-16 · SL-17 | 98 new tests in `SecurityLoopTests` and `ShippedConfigurationTests`; 293 passing in total |
+| **Done** | SL-01 · SL-02 · SL-03 · SL-04 · SL-12 · SL-13 · SL-15 · SL-16 · SL-17 | 98 new tests in `SecurityLoopTests` and `ShippedConfigurationTests`; 293 passing in total. SL-15 is a documentation reconciliation, not covered by tests |
 | **Before production traffic** | Exercise SL-01's AWS identity and SL-03's installer against a staging account and an IIS host | A signed request from a real role authenticates, and a forged one is refused by STS · the installed site answers only on HTTPS with the expected certificate |
 | **Next sprint** (2–4 weeks) | SL-05 · SL-06 · SL-07 · SL-09 · SL-11 | 40 requests with distinct random keys → 429s from one IP · rotating an app key → its old STS token gets 401 · disabling one detector → audit carries the diff · unknown provider → 400 at create · gateway role policy has no `s3:DeleteObject` |
-| **Planned** | SL-08 · SL-10 · SL-14 · SL-15 | Bypass inputs from SL-08 detected after normalisation · on-prem backend unreachable except from the gateway host · the registry is unreadable on disk · docs reconciled with a code citation per claim |
+| **Planned** | SL-08 · SL-10 · SL-14 | Bypass inputs from SL-08 detected after normalisation · on-prem backend unreachable except from the gateway host · the registry is unreadable on disk |
 
 Items already open in `architecture.md` — per-application ownership, asymmetric KMS signing, a database registry, SIEM export, token budgets and a penetration test — remain valid. The penetration test should follow the "before production traffic" row and cover the management plane.
 

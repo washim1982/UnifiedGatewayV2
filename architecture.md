@@ -17,8 +17,8 @@ The **Universal AI LLM Gateway** provides a unified, secure abstraction layer be
 2. **Zero Credential Exposure:** Temporary AWS STS session tokens and IAM long-term secrets are isolated in memory and never logged, cached to disk unencrypted, or transmitted to client applications.
 3. **Least Privilege & Role Isolation:** AWS Bedrock execution is mediated via short-lived temporary STS sessions (`sts:AssumeRole`) scoped strictly to `bedrock:InvokeModel` with automated background token rotation.
 4. **Application Sandboxing & Auth:** Every upstream consumer application is authenticated via distinct cryptographically generated API keys (`ug_live_*`), verified using constant-time SHA-256 hash comparison.
-5. **Data Protection & Secret Encryption:** Persistent application metadata, role configurations, and master keys are safeguarded using ASP.NET Core Data Protection API.
-6. **Defense in Depth:** Rate limiting, non-root Alpine container sandboxing, CORS lockdown, and automated fallback failover prevent denial of service and data poisoning.
+5. **Secret Encryption:** The token signing key and the break-glass credential are held in the environment's secret store, encrypted with KMS, and fetched at runtime — ASP.NET Core Data Protection was removed, because a key ring on the web tier can forge admin tokens ([`SigningKeyProvider.cs`](Services/Cloud/SigningKeyProvider.cs)). The application registry itself is **not yet encrypted at rest** — see SL-14 in [`docs/security-architecture-flow.md`](docs/security-architecture-flow.md).
+6. **Defense in Depth:** Rate limiting, CORS lockdown, a request-body cap, per-backend circuit breaking and automated fallback failover bound denial of service. There is no container sandbox: deployment is IIS in-process on Windows Server, and the process runs as the app-pool identity.
 
 ---
 
@@ -30,18 +30,18 @@ flowchart TD
     subgraph TB_EXT["TRUST BOUNDARY 1: External / Client Zone (Untrusted)"]
         ClientAppA["Enterprise App A\n(Customer Support)"]
         ClientAppB["Enterprise App B\n(Code Reviewer)"]
-        AdminUser["Platform Admin\n(Dashboard UI)"]
+        AdminUser["Platform Admin\n(Dashboard UI - Okta OIDC sign-in)"]
     end
 
-    subgraph TB_DMZ["TRUST BOUNDARY 2: Gateway DMZ / Kubernetes Ingress"]
-        Ingress["TLS / Ingress Controller\n(HTTPS Termination - Port 443/8080)"]
+    subgraph TB_DMZ["TRUST BOUNDARY 2: IIS on Windows Server"]
+        Ingress["IIS site - HTTPS-only binding\n(server certificate, port 443)\nAPI calls over HTTP refused: HTTPS_REQUIRED"]
         RateLimiter["Rate Limiting & CORS Filter\n(GatewayCorsPolicy)"]
     end
 
     subgraph TB_GW["TRUST BOUNDARY 3: Gateway Processing Boundary (.NET 8 Core)"]
         subgraph AuthLayer["Authentication & Security Subsystem"]
             ApiKeyFilter["X-API-Key & Bearer Validator"]
-            SecService["ISecurityService\n- Fixed-Time SHA256 Verification\n- Data Protection Key Encryption\n- Secret Masking Engine"]
+            SecService["ISecurityService\n- Fixed-Time SHA256 Verification\n- HMAC-SHA256 token signing (key from the secret store)\n- Secret Masking Engine"]
         end
 
         subgraph GuardrailSubsystem["Enterprise Guardrail Subsystem (Admin Level)"]
@@ -50,13 +50,13 @@ flowchart TD
 
         subgraph CoreRouter["Orchestration & Routing Engine"]
             Router["IModelRouter\n- Request Normalizer\n- Resilient Fallback Orchestrator"]
-            AppReg["IApplicationRegistryService\n- Encrypted Config Store\n- Version History Snapshots\n- Telemetry & Audit Logger"]
+            AppReg["IApplicationRegistryService\n- JSON config store on the host (plaintext - SL-14)\n- Version History Snapshots\n- Telemetry & Audit Logger"]
         end
 
         subgraph CredentialVault["Credential & Token Isolation Subsystem"]
             STSSvc["ISTSService\n(In-Memory Token Cache)"]
             STSWorker["AwsCredentialBackgroundService\n(Proactive Token Refresh - 5m TTL Buffer)"]
-            DataProtection["ASP.NET Data Protection API\n(Persistent File/KMS Keys)"]
+            SecretStore["Secrets Manager + KMS\n(signing key, break-glass credential, access policy)"]
         end
     end
 
@@ -75,7 +75,7 @@ flowchart TD
     %% Data Flow & Interconnections
     ClientAppA -->|"HTTPS POST /gateway/{appId}/invoke\nX-API-Key: ug_live_..."| Ingress
     ClientAppB -->|"HTTPS POST /gateway/{appId}/invoke\nX-API-Key: ug_live_..."| Ingress
-    AdminUser -->|"HTTPS GET / & REST /api/*\nX-API-Key: Master Admin Key"| Ingress
+    AdminUser -->|"HTTPS GET / & REST /api/*\nBearer: Okta access token"| Ingress
 
     Ingress --> RateLimiter
     RateLimiter --> ApiKeyFilter
@@ -88,11 +88,11 @@ flowchart TD
     GuardrailSvc -.->|"If Redact Mode: Inline Anonymize"| Router
 
     Router -->|"2. Fetch System Prompt & Model Config"| AppReg
-    AppReg -.->|"Encrypt / Decrypt Sensitive Fields"| DataProtection
+    SecService -.->|"Fetch signing key / admin credential"| SecretStore
 
     Router -->|"3. Request Temporary Bedrock Session"| STSSvc
     STSWorker -->|"Proactive Background Refresh"| STSSvc
-    STSSvc -->|"AssumeRoleAsync (TLS 1.3 / SigV4)"| AWS_STS
+    STSSvc -->|"AssumeRoleAsync (TLS / SigV4)"| AWS_STS
     AWS_STS -->|"Issue Ephemeral Credentials\n(AccessKeyId, SecretKey, SessionToken)"| STSSvc
     AWS_STS -.->|"Scope to IAM Role Policy"| AWS_IAM
 
@@ -114,7 +114,7 @@ flowchart TD
 | **Tampering** | Modification of in-flight prompts, prompt injection attacks, or unauthorized tampering with registry files. | Prompt injection (`ignore previous instructions`), DAN jailbreak exploits, or man-in-the-middle attacks. | • **Guardrails Subsystem** detects and sanitizes/blocks prompt override attempts.<br>• Mandatory TLS for all external and cloud communication.<br>• AWS SigV4 cryptographic request signing on all AWS Bedrock calls.<br>• Secrets and the token signing key are held in the environment's secret store (KMS-encrypted), not in a local key ring. |
 | **Repudiation** | Malicious users denying sending abusive, sensitive, or high-cost prompts. | Lack of invocation logs or trace correlation. | • Append-only audit trail in object storage (S3), partitioned by record date, surviving host loss.<br>• Every record carries actor, auth type, token id, source IP and `traceId`.<br>• Privileged management actions (create, delete, rotate, guardrail and policy changes) are recorded with the same attribution. |
 | **Information Disclosure** | Leakage of customer PII (SSN, Email, Phone), PCI (Credit Cards, CVV, IBAN), API tokens, or AWS STS temporary credentials. | Prompts containing sensitive user data being transmitted to cloud LLM or stored in unencrypted logs. | • **Pre-Execution Guardrails** redact sensitive data (`[REDACTED_CREDIT_CARD]`, `[REDACTED_SSN]`, `[REDACTED_AWS_KEY]`) before reaching AWS Bedrock or logs.<br>• Algorithmic **Luhn checksum** verifies valid credit cards to prevent false positives.<br>• AWS STS session tokens never logged or serialized to client responses. |
-| **Denial of Service (DoS)** | Backend model exhaustion, prompt flooding, or local LLM server starvation. | Flooding gateway with maximum-token requests or triggering concurrent heavy model loads. | • Configurable rate limiting per minute (`RateLimitPerMinute`).<br>• Explicit `max_tokens` quotas and request timeouts (30–120s).<br>• Resilient Polly circuit breaking & retry policies.<br>• Automated failover routing (Bedrock -> Local or vice-versa). |
+| **Denial of Service (DoS)** | Backend model exhaustion, prompt flooding, or local LLM server starvation. | Flooding gateway with maximum-token requests or triggering concurrent heavy model loads. | • Configurable rate limiting per minute (`RateLimitPerMinute`).<br>• Explicit `max_tokens` quotas and request timeouts (30–120s).<br>• Polly circuit breaking, one breaker per on-prem backend, with retries limited to idempotent requests.<br>• Automated failover routing (Bedrock -> Local or vice-versa). |
 | **Elevation of Privilege** | Cross-tenant access to another application's prompt or unauthorized access to AWS infrastructure. | Tenant parameter pollution or IAM role permission creep. | • Strict app isolation: requests to `/gateway/{appId}/invoke` can only execute within the registered `appId` security context.<br>• AWS IAM Role scoped strictly to `bedrock:InvokeModel`.<br>• Management-plane actions authorized per action against IAM policy; the master credential no longer authenticates as an application.<br>• STS token `scope` is enforced, so a read-scoped token cannot invoke. |
 
 ---
@@ -171,8 +171,11 @@ omitted — a sign-off document that only records successes is how gaps get acce
 | Mandatory TLS | **Implemented** | The installer creates an HTTPS-only IIS binding; API calls over HTTP are refused with `HTTPS_REQUIRED` rather than redirected; HSTS; only Development is exempt — [`install.ps1`](deploy/iis/install.ps1), [`HttpsEnforcementMiddleware.cs`](Startup/HttpsEnforcementMiddleware.cs), [`StartupValidator.cs`](Startup/StartupValidator.cs) |
 | Ingress and egress guardrails, fail closed | **Implemented** | A scan that times out is a violation, not a pass — [`GuardrailService.cs`](Services/GuardrailService.cs), [`ModelRouter.cs`](Services/ModelRouter.cs) |
 | Guardrail patterns bounded (ReDoS) | **Implemented** | 250 ms match timeout on all 14 patterns |
-| Rate limiting across the surface | **Implemented** | Global floor plus `per-app`, `token-issuance` and `management` policies |
-| Polly retry **and** circuit breaking | **Implemented** | [`Program.cs`](Program.cs) — retry with backoff plus `CircuitBreakerAsync` |
+| Rate limiting across the surface | **Partial** | Global floor plus `per-app`, `token-issuance` and `management` policies. The partition is chosen before authentication, so a caller who varies the credential string gets a fresh bucket each request — SL-05 |
+| Access control cannot be disabled in a reachable environment | **Implemented** | `Gateway:Cloud:AccessControl:Enabled: false` is refused at startup outside Development, whatever `AdminRoleArns` lists — [`StartupValidator.cs`](Startup/StartupValidator.cs) |
+| Unauthenticated endpoints disclose nothing useful | **Implemented** | `/gateway/sts/inspect` reports only that a rejected token is invalid, identically for expired, revoked and forged, and logs the rejection; `/status` reports liveness only; `/gateway/health` is bare liveness — [`SecurityService.cs`](Services/SecurityService.cs), [`Program.cs`](Program.cs) |
+| Development confined to loopback | **Implemented** | Development auto-grants every IAM role and skips the transport checks, so startup refuses any non-loopback binding there — [`StartupValidator.cs`](Startup/StartupValidator.cs) |
+| Polly retry **and** circuit breaking | **Implemented** | One breaker per on-prem backend, so a dead Ollama does not open the circuit for LM Studio and llama.cpp; retries apply to idempotent requests only, because a generation POST that timed out may still be running — [`LocalProviderResilience.cs`](Startup/LocalProviderResilience.cs) |
 | Correct HTTP status codes | **Implemented** | 422 on guardrail block, 413 oversized, 502/504 provider failure — [`GatewayEndpoints.cs`](Endpoints/GatewayEndpoints.cs) |
 | Security response headers and CSP | **Implemented** | [`Program.cs`](Program.cs) |
 | Durable, attributable audit trail | **Implemented** | S3-backed, date-partitioned — [`S3AuditStore.cs`](Services/Telemetry/S3AuditStore.cs) |
@@ -182,9 +185,12 @@ omitted — a sign-off document that only records successes is how gaps get acce
 | Host credentials without a stored access key | **Implemented** | IAM Roles Anywhere exchanges an X.509 client certificate for expiring credentials; every AWS seam resolves through it — [`RolesAnywhereCredentialProvider.cs`](Services/Aws/RolesAnywhereCredentialProvider.cs) |
 | Asymmetric token signing via KMS | **Open** | Tokens are HMAC-signed with a key fetched from the secret store |
 | Registry in a database | **Open** | Still a local file, so the gateway is single-node for writes |
+| Registry encrypted at rest | **Open** | Plaintext JSON under the site root, holding key hashes, system prompts and rate cards; `ICryptoProvider` exists but has no caller on this path — SL-14 |
 | SIEM export | **Open** | Nothing ships audit records off-box |
 | Per-app token budgets that refuse requests | **Open** | Billing reports spend; it does not enforce a ceiling |
 | Identity verified by the gateway in AWS mode | **Implemented** | Automation presents a SigV4-signed `sts:GetCallerIdentity` request, which the gateway relays to STS; a bare ARN is refused — [`AwsIdentityProvider.cs`](Services/Cloud/Aws/AwsIdentityProvider.cs), [`docs/aws-iam-authentication.md`](docs/aws-iam-authentication.md). Not yet exercised against a real account. |
 | AWS provider path exercised | **Open** | Written against the same contracts as the simulator providers, but never executed against a real account. The Roles Anywhere signing is unit-tested against the certificate's own public key; it has not been verified against a real trust anchor. |
 | Container hardening | **Not applicable** | There is no container; deployment is IIS in-process. The previous claim of non-root execution at UID 1000 described an image that does not exist. |
+| On-prem backends reachable only through the gateway | **Open** | Ollama, LM Studio and llama.cpp have no authentication and are reached over plain HTTP; they need loopback binding or a firewall admitting only the gateway — SL-10 |
+| Audit trail the gateway cannot erase | **Open** | Retention is enforced by the gateway deleting S3 objects, so its own role can delete its history; needs Object Lock, lifecycle retention and `s3:DeleteObject` removed from the role — SL-11 |
 | Penetration test | **Open** | Not performed; the threat model above does not yet cover the management plane |

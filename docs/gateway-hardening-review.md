@@ -12,7 +12,7 @@ Security assessment of the Unified LLM Gateway (`UnifiedGatewayV2`).
 
 > **Historical document.** This is the review of `133e4f5`, before any remediation, and is kept as written.
 > - All 26 findings are closed. See [`hardening-implementation.md`](hardening-implementation.md), and the re-check at [`gateway-hardening-review.html`](gateway-hardening-review.html).
-> - The current assessment is [`security-architecture-flow.md`](security-architecture-flow.md). It covers four later fixes (SL-01 to SL-04) and the items still open.
+> - The current assessment is [`security-architecture-flow.md`](security-architecture-flow.md). It covers eight later fixes (SL-01 to SL-04, then SL-12, SL-13, SL-16 and SL-17) and the nine items still open.
 >
 > Related: [`../README.md`](../README.md), [`../architecture.md`](../architecture.md).
 

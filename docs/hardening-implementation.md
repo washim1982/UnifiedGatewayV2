@@ -2,17 +2,25 @@
 
 Implements the Phase 0–2 findings from [`gateway-hardening-review.md`](gateway-hardening-review.md) against the local **AWS Simulator** (`C:\Users\wasim\workspace\Projects\AWS-SIMULATOR`), with a provider seam so TEST and PROD run the **same binary** and differ only in configuration.
 
-> **Later changes.** This page records the Phase 0–2 work as delivered. Four gaps found afterwards have since been fixed — SL-01 to SL-04 in [`security-architecture-flow.md`](security-architecture-flow.md):
+> **Later changes.** This page records the Phase 0–2 work as delivered. Eight gaps found afterwards have since been fixed — see [`security-architecture-flow.md`](security-architecture-flow.md).
+>
+> The four that let an outsider in (SL-01 to SL-04):
 > - AWS-mode identity is verified by STS rather than asserted.
 > - Both simulators and the Okta simulator are Development-only.
 > - TLS is enforced by an HTTPS-only IIS binding, with API calls over HTTP refused.
 > - Break-glass tokens are scoped, attributed to a configured principal, and audited.
 >
+> Then four self-contained ones (SL-12, SL-13, SL-16, SL-17):
+> - `Gateway:Cloud:AccessControl:Enabled: false` is refused at startup outside Development.
+> - `/gateway/sts/inspect` discloses nothing about a token it rejects; `/status` reports liveness only.
+> - A Development host must bind loopback, since Development auto-grants every IAM role.
+> - Each on-prem backend has its own circuit breaker, and only idempotent requests are retried.
+>
 > Where this page described the earlier behaviour it has been updated, and says so.
 
 | | |
 | :--- | :--- |
-| **Tests** | 62 passing at delivery (was 40); 263 today |
+| **Tests** | 62 passing at delivery (was 40); 293 today |
 | **Verified against** | Live simulator — IAM `:5001`, KMS `:5003`, Bedrock `:5004` |
 | **Environments** | `Development` → simulators · `Test` / `Production` → real AWS (the simulators accept a role name as identity, so they are refused outside Development — see SL-01 and SL-03 in [`security-architecture-flow.md`](security-architecture-flow.md)) |
 
@@ -64,15 +72,26 @@ One setting decides which implementation every cloud-facing dependency resolves 
 | **H2** | Wildcard CORS | The `AllowAnyOrigin` branch is gone. An empty allow-list means no cross-origin access. |
 | **H3** | No TLS enforcement | `UseHsts` + `UseHttpsRedirection`, gated on `Security:RequireHttps`. *Tightened since (SL-03):* only Development is exempt, because Test is a network host; the IIS installer creates an HTTPS-only binding; API calls over plain HTTP are refused with `403 HTTPS_REQUIRED` rather than redirected. |
 | **H4** | STS tokens unrevocable | Tokens carry a signing-key **generation**; `POST /api/credentials/rotate-signing-key` mints a new generation and every earlier token stops validating. Plus a `jti` denylist for targeted revocation. Default TTL cut from 1 h to 15 min, ceiling from 7 days to 1 h. *Since (SL-04):* admin tokens are capped at 15 minutes and need the `admin` scope on `/api`. |
-| **H5** | Rate limiting gaps | A global limiter as the floor, plus named policies: `per-app`, `token-issuance` (tight — it is the brute-force oracle), `management`. |
+| **H5** | Rate limiting gaps | A global limiter as the floor, plus named policies: `per-app`, `token-issuance` (tight — it is the brute-force oracle), `management`. *Partial:* the partition is chosen before authentication, so a caller who varies the credential string still gets a fresh bucket — SL-05, open. |
 | **H6** | Guardrail ReDoS | 250 ms `matchTimeoutMilliseconds` on all 14 patterns and the inline `Regex.Replace`. A timeout is reported as a `ScanTimeout` violation, so the guardrail **fails closed**. |
 | **H7** | Key ring forges admin tokens | DataProtection removed. Tokens are HMAC-SHA256 signed with a key held in the KMS-encrypted secret store, fetched and cached at runtime. The stale local key ring was deleted. |
 
 ### Medium
 
-`M1` actor attribution (`Actor`, `AuthType`, `TokenId`, `SourceIp`, `TraceId` on log entries, plus a `ManagementAuditEntry` for every privileged action) · `M2` correct status codes (422/413/409/502/504 instead of blanket 200) · `M3` info-disclosure endpoints authorized; `/gateway/health` reduced to bare liveness · `M4` master key no longer authenticates as any application · `M5` atomic `File.Replace` writes and no reseeding over an unparseable registry · `M7` Swagger in Development only · `M8` CSP and security headers · `M9` `AllowedHosts` scoped · `L2` `appId` charset.
+`M1` actor attribution (`Actor`, `AuthType`, `TokenId`, `SourceIp`, `TraceId` on log entries, plus a `ManagementAuditEntry` for every privileged action) · `M2` correct status codes (422/413/409/502/504 instead of blanket 200) · `M3` info-disclosure endpoints authorized; `/gateway/health` reduced to bare liveness (*extended since, SL-13:* `/gateway/sts/inspect` says only that a rejected token is invalid, in the same words whether it was expired, revoked or forged, and `/status` no longer reports its version) · `M4` master key no longer authenticates as any application · `M5` atomic `File.Replace` writes and no reseeding over an unparseable registry · `M7` Swagger in Development only · `M8` CSP and security headers · `M9` `AllowedHosts` scoped · `L2` `appId` charset.
 
 Also fixed in passing: `GuardrailActionMode` now crosses the API as a string (`"Redact"`), matching how it is written in appsettings — previously the API emitted `0` and rejected the value an operator would copy from the config file.
+
+### Closed after delivery
+
+Four findings from the later design review that needed no new subsystem — a validator rule, a response shape, and a resilience policy. Each is covered by tests in `SecurityLoopTests`.
+
+| ID | Finding | How it is closed |
+| :--- | :--- | :--- |
+| **SL-12** | Access control could be switched off | The validator refused `AccessControl:Enabled: false` only when `AdminRoleArns` was also empty — but the authorization handler never consults those ARNs while the switch is off, so listing one and disabling the engine started a gateway on which every authenticated principal was a full administrator. The switch itself is now refused outside Development. |
+| **SL-13** | `/gateway/sts/inspect` was a token oracle | It returned the claims of any correctly signed token, expired and revoked ones included, so a stolen credential could be tested without ever reaching the invoke audit. A token that fails validation now returns only `isValid: false` and whether it expired, with the same message for expired, revoked and forged, and the rejection is logged at Warning. A token that validates still reports its own claims. `/status` reports liveness only. |
+| **SL-16** | Development was not held to loopback | Development auto-creates any IAM role with `Allow */*` and is the one environment exempt from the HTTPS and app-authentication rules, yet nothing stopped it listening on the network. The validator now reads the host's URL list — `ASPNETCORE_URLS`, `--urls`, `launchSettings`' `applicationUrl` — and refuses a Development start on any non-loopback binding, wildcards included. |
+| **SL-17** | One circuit breaker for three backends | A single `CircuitBreakerAsync` instance was shared by Ollama, LM Studio and llama.cpp, so five failures from one dead backend opened the circuit for all three. Generation POSTs were also retried on timeout, although a timed-out generation may still be running — the retry burns a second generation and bills the application twice. `Startup/LocalProviderResilience.cs` now builds a breaker per named client and retries only `GET`, `HEAD` and `OPTIONS`. |
 
 ---
 
@@ -143,6 +162,7 @@ Honest gaps, so nothing here reads as more finished than it is.
 - ~~**`AwsIdentityProvider` trusts an upstream-asserted principal ARN.**~~ **Resolved (SL-01).** It trusted any `arn:aws:` string a client sent, and the IIS deployment had no upstream to verify it. It now relays a caller's SigV4-signed `sts:GetCallerIdentity` request to STS and trusts only the ARN STS returns — see [`aws-iam-authentication.md`](aws-iam-authentication.md).
 - **Generation-based revocation is what actually fires**, not the `jti` check, when the signing key rotates: a new key changes the HMAC, so verification fails before the generation comparison is reached. The generation claim still matters for diagnostics and for a future multi-key overlap window. The `jti` denylist is in-memory only, so it is per-node; the generation lever is the fleet-wide one.
 - **Phases 3–5 are partly done since.** Okta OIDC operator sign-in and CI scanning (`NuGetAudit`, CodeQL, gitleaks) have landed. Still open: a durable SQL registry, SIEM export and per-app token budgets.
+- **Nine design-review findings remain open**, all medium or low: rate-limit partitioning (SL-05), per-application revocation (SL-06), guardrail-change auditing (SL-07), guardrail evasion (SL-08), routing that falls open to the cloud (SL-09), on-prem backends reachable around the gateway (SL-10), an audit trail the gateway's own role can delete (SL-11), the registry in plaintext on the web host (SL-14) and documentation drift (SL-15). [`security-architecture-flow.md`](security-architecture-flow.md) §6 gives the order; SL-10 and SL-11 need AWS and network changes rather than code.
 - **`BedrockGuardrails` is still dead config.** `GuardrailIdentifier` is read by nothing (`Models/GuardrailOptions.cs:35`).
 
 ---
