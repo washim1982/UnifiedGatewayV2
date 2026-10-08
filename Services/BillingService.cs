@@ -23,6 +23,16 @@ public interface IBillingService
         DateTimeOffset? to = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Token activity for the window: sessions, requests, streaks, peak hour, a per-day
+    /// series and a per-model split. With no <paramref name="from"/>, the window reaches
+    /// back <see cref="BillingOptions.UsageHistoryDays"/>.
+    /// </summary>
+    Task<UsageSummary> GetUsageAsync(
+        DateTimeOffset? from = null,
+        DateTimeOffset? to = null,
+        CancellationToken cancellationToken = default);
+
     /// <summary>The same rows the summary is built from, as CSV, for finance to reconcile against.</summary>
     Task<string> ExportCsvAsync(
         BillingGrain grain,
@@ -217,6 +227,91 @@ public class BillingService : IBillingService
         return result with { Buckets = BuildBuckets(entries, grain, windowStart, windowEnd) };
     }
 
+    public async Task<UsageSummary> GetUsageAsync(
+        DateTimeOffset? from = null,
+        DateTimeOffset? to = null,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var windowEnd = (to ?? now).ToUniversalTime();
+        var windowStart = (from ?? windowEnd.AddDays(-Math.Max(1, _billing.UsageHistoryDays) + 1)).ToUniversalTime();
+        windowStart = TruncateTo(windowStart, BillingGrain.Daily);
+
+        var entries = await LoadEntriesAsync(windowStart, windowEnd, cancellationToken);
+
+        var byDay = entries
+            .GroupBy(e => PeriodKey(e.Timestamp, BillingGrain.Daily))
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+
+        var days = EnumeratePeriods(BillingGrain.Daily, windowStart, windowEnd)
+            .Select(p =>
+            {
+                var key = PeriodKey(p.Start, BillingGrain.Daily);
+                byDay.TryGetValue(key, out var rows);
+                rows ??= [];
+
+                return new UsageDay
+                {
+                    Date = key,
+                    Requests = rows.Count,
+                    InputTokens = rows.Sum(e => (long)e.InputTokens),
+                    OutputTokens = rows.Sum(e => (long)e.OutputTokens),
+                    Models = ModelTotals(rows, windowTotal: 0)
+                };
+            })
+            .ToList();
+
+        // Streaks run over UTC days. The current one must end today: a streak that stopped
+        // yesterday is already broken as far as "current" is concerned.
+        int longest = 0, run = 0;
+        foreach (var day in days)
+        {
+            run = day.Requests > 0 ? run + 1 : 0;
+            longest = Math.Max(longest, run);
+        }
+
+        var today = PeriodKey(windowEnd, BillingGrain.Daily);
+        var current = 0;
+        for (var i = days.Count - 1; i >= 0 && days[i].Requests > 0; i--)
+        {
+            current++;
+        }
+        if (days.Count == 0 || days[^1].Date != today) current = 0;
+
+        var byHour = new long[24];
+        foreach (var entry in entries)
+        {
+            byHour[entry.Timestamp.UtcDateTime.Hour]++;
+        }
+
+        var inputTokens = entries.Sum(e => (long)e.InputTokens);
+        var outputTokens = entries.Sum(e => (long)e.OutputTokens);
+        var models = ModelTotals(entries, inputTokens + outputTokens);
+
+        return new UsageSummary
+        {
+            GeneratedAt = now,
+            WindowStart = windowStart,
+            WindowEnd = windowEnd,
+
+            Sessions = entries.Select(SessionKey).Distinct(StringComparer.Ordinal).LongCount(),
+            Requests = entries.Count,
+            InputTokens = inputTokens,
+            OutputTokens = outputTokens,
+
+            ActiveDays = days.Count(d => d.Requests > 0),
+            CurrentStreakDays = current,
+            LongestStreakDays = longest,
+
+            PeakHourUtc = entries.Count > 0 ? Array.IndexOf(byHour, byHour.Max()) : null,
+            RequestsByHourUtc = byHour,
+            FavoriteModel = models.FirstOrDefault(m => m.TotalTokens > 0)?.Model,
+
+            Days = days,
+            Models = models
+        };
+    }
+
     public async Task<string> ExportCsvAsync(
         BillingGrain grain,
         DateTimeOffset? from = null,
@@ -401,6 +496,46 @@ public class BillingService : IBillingService
     /// <summary>Output tokens produced per input token.</summary>
     private static double Efficiency(long inputTokens, long outputTokens) =>
         inputTokens > 0 ? Math.Round((double)outputTokens / inputTokens, 3) : 0.0;
+
+    /// <summary>Per-model token totals, most tokens first. Share is left at zero when no window total is given.</summary>
+    private static List<ModelUsage> ModelTotals(IEnumerable<RequestLogEntry> entries, long windowTotal)
+    {
+        return entries
+            .GroupBy(e => string.IsNullOrWhiteSpace(e.Model) ? "(unknown)" : e.Model, StringComparer.OrdinalIgnoreCase)
+            .Select(g =>
+            {
+                var input = g.Sum(e => (long)e.InputTokens);
+                var output = g.Sum(e => (long)e.OutputTokens);
+                return new ModelUsage
+                {
+                    Model = g.Key,
+                    Requests = g.LongCount(),
+                    InputTokens = input,
+                    OutputTokens = output,
+                    SharePercent = windowTotal > 0
+                        ? Math.Round((double)(input + output) / windowTotal * 100.0, 1)
+                        : 0.0
+                };
+            })
+            .OrderByDescending(m => m.TotalTokens)
+            .ThenBy(m => m.Model, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>
+    /// What makes two requests the same session. An STS token is a session by construction;
+    /// a long-lived key is not, so its activity is split per caller per UTC day.
+    /// </summary>
+    private static string SessionKey(RequestLogEntry entry)
+    {
+        if (!string.IsNullOrWhiteSpace(entry.TokenId))
+        {
+            return "sts:" + entry.TokenId;
+        }
+
+        var caller = entry.Actor ?? entry.AppId ?? entry.SourceIp ?? "anonymous";
+        return "key:" + caller + "@" + PeriodKey(entry.Timestamp, BillingGrain.Daily);
+    }
     /// <summary>
     /// Buckets the window at the requested grain, emitting empty periods too. A gap in a
     /// spend chart should read as "nothing was spent", not as a missing data point.

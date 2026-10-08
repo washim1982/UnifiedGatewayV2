@@ -518,6 +518,15 @@ public class LocalDotNetAccessControlProvider : IAccessControlProvider
                 ? statements.EnumerateArray().ToList()
                 : [statements];
 
+            // Any document using an element this evaluator cannot honour denies the whole
+            // request, exactly as AwsAccessControlProvider does (SEC-01).
+            var unsupported = PolicyDocumentGuard.FindUnsupportedElement(list);
+            if (unsupported is not null)
+            {
+                reason = $"Policy uses unsupported element '{unsupported}'";
+                return false;
+            }
+
             foreach (var statement in list)
             {
                 if (!Matches(statement, "action", action)) continue;

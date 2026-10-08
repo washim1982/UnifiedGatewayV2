@@ -241,6 +241,15 @@ public class AwsAccessControlProvider : IAccessControlProvider
             return Deny(principalArn, action, resource, "Policy contains no Statement array");
         }
 
+        var unsupported = PolicyDocumentGuard.FindUnsupportedElement(statements.EnumerateArray());
+        if (unsupported is not null)
+        {
+            _logger.LogError(
+                "The management access policy uses '{Element}', which this evaluator does not support. " +
+                "Denying every request until it is removed (fail-closed).", unsupported);
+            return Deny(principalArn, action, resource, $"Policy uses unsupported element '{unsupported}'");
+        }
+
         var allowMatched = false;
 
         foreach (var statement in statements.EnumerateArray())

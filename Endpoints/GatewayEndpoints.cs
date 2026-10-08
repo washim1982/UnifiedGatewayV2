@@ -26,6 +26,7 @@ public static class GatewayEndpoints
             [FromHeader(Name = "Authorization")] string? authHeader,
             HttpContext ctx,
             IApplicationRegistryService registryService,
+            ICallerQuota quota,
             CancellationToken ct) =>
         {
             var body = request ?? new AppStsTokenRequest();
@@ -66,6 +67,14 @@ public static class GatewayEndpoints
                     error = "UNAUTHORIZED",
                     message = "Invalid application API key or master admin key."
                 }, statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Which application a key belongs to is only known once it verifies, so the quota is
+            // checked after minting: an application over its issuance quota gets 429 from any
+            // address, and the token it would have received is never released (SEC-03).
+            if (!quota.TryAcquireIssuance(tokenResponse.IsAdmin ? "break-glass" : tokenResponse.AppId))
+            {
+                return QuotaExceeded(ctx);
             }
 
             return Results.Ok(tokenResponse);
@@ -112,6 +121,7 @@ public static class GatewayEndpoints
             HttpContext ctx,
             IApplicationRegistryService registryService,
             IModelRouter router,
+            ICallerQuota quota,
             CancellationToken ct) =>
         {
             var apiKey = ExtractApiKey(xApiKey, authHeader);
@@ -129,6 +139,12 @@ public static class GatewayEndpoints
                         Message = "Invalid, expired, or missing API key / STS token for this application."
                     }
                 }, statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Every key and STS token of this application draws on one quota (SEC-03).
+            if (!quota.TryAcquireInvocation(appConfig.AppId))
+            {
+                return QuotaExceeded(ctx);
             }
 
             var response = await router.RouteAppRequestAsync(
@@ -151,6 +167,7 @@ public static class GatewayEndpoints
             ISecurityService securityService,
             IAdminCredentialService adminCredentials,
             IModelRouter router,
+            ICallerQuota quota,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -216,6 +233,11 @@ public static class GatewayEndpoints
                 }
             }
 
+            if (!quota.TryAcquireInvocation("universal:" + (caller?.Actor ?? "anonymous")))
+            {
+                return QuotaExceeded(ctx);
+            }
+
             var response = await router.RouteAsync(request, WithRequestDetail(caller, ctx), ct);
             return ToHttpResult(response);
         })
@@ -238,6 +260,20 @@ public static class GatewayEndpoints
         #endregion
     }
 
+
+    /// <summary>The same 429 the pre-authentication limiters return, for a spent per-application quota.</summary>
+    private static IResult QuotaExceeded(HttpContext ctx)
+    {
+        ctx.Response.Headers.RetryAfter = "60";
+        return Results.Json(new
+        {
+            error = new
+            {
+                code = "RATE_LIMITED",
+                message = "Rate limit exceeded for this application. Please retry after the window resets."
+            }
+        }, statusCode: StatusCodes.Status429TooManyRequests);
+    }
 
     /// <summary>
     /// Completes an authenticated caller with the details only the request knows: source

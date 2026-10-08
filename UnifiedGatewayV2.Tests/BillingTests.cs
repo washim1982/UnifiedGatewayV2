@@ -701,4 +701,79 @@ public class BillingTests
         Assert.DoesNotContain(",=HYPERLINK", csv);
         Assert.Contains("'=HYPERLINK", csv);
     }
+
+    // --- Token usage --------------------------------------------------------------------
+
+    [Fact]
+    public async Task Usage_CountsActiveDaysStreaksPeakHourAndSessions()
+    {
+        var today = new DateTimeOffset(DateTimeOffset.UtcNow.UtcDateTime.Date, TimeSpan.Zero);
+
+        await WriteAuditAsync(
+            Entry("app-a", today, 100, 50, 1m),                                            // 00:00 today
+            Entry("app-a", today.AddDays(-1).AddHours(9), 100, 50, 1m) with { TokenId = "jti-1" },
+            Entry("app-a", today.AddDays(-1).AddHours(9), 100, 50, 1m) with { TokenId = "jti-1" },
+            Entry("app-a", today.AddDays(-2).AddHours(9), 100, 50, 1m),
+            Entry("app-a", today.AddDays(-3).AddHours(10), 100, 50, 1m),
+            // Day -4 is empty: this pair is a separate, shorter streak.
+            Entry("app-a", today.AddDays(-5).AddHours(14), 100, 50, 1m),
+            Entry("app-a", today.AddDays(-6).AddHours(14), 100, 50, 1m));
+
+        var usage = await CreateBilling(new BillingOptions { UsageHistoryDays = 30 }).GetUsageAsync();
+
+        Assert.Equal(7, usage.Requests);
+        Assert.Equal(1050, usage.TotalTokens);
+        Assert.Equal(6, usage.ActiveDays);
+        Assert.Equal(4, usage.CurrentStreakDays);
+        Assert.Equal(4, usage.LongestStreakDays);
+        Assert.Equal(9, usage.PeakHourUtc);
+        Assert.Equal(3, usage.RequestsByHourUtc[9]);
+
+        // The two STS calls share one session; every other key-authenticated day is its own.
+        Assert.Equal(6, usage.Sessions);
+
+        // Every day of the window is present, empty ones included.
+        Assert.Equal(30, usage.Days.Count);
+        Assert.Equal(usage.TotalTokens, usage.Days.Sum(d => d.TotalTokens));
+    }
+
+    [Fact]
+    public async Task Usage_CurrentStreakIsZeroWhenTodayHasNoRequests()
+    {
+        var today = new DateTimeOffset(DateTimeOffset.UtcNow.UtcDateTime.Date, TimeSpan.Zero);
+        await WriteAuditAsync(
+            Entry("app-a", today.AddDays(-1), 100, 0, 1m),
+            Entry("app-a", today.AddDays(-2), 100, 0, 1m));
+
+        var usage = await CreateBilling(new BillingOptions { UsageHistoryDays = 7 }).GetUsageAsync();
+
+        Assert.Equal(0, usage.CurrentStreakDays);
+        Assert.Equal(2, usage.LongestStreakDays);
+    }
+
+    [Fact]
+    public async Task Usage_SplitsTokensByModel_AndSharesCoverTheWhole()
+    {
+        // Anchored to midnight so the "today" row is today however close to midnight this runs.
+        var today = new DateTimeOffset(DateTimeOffset.UtcNow.UtcDateTime.Date, TimeSpan.Zero);
+        await WriteAuditAsync(
+            Entry("app-a", today, 600, 300, 1m) with { Model = "model-big" },
+            Entry("app-b", today, 50, 50, 1m) with { Model = "model-small" },
+            Entry("app-b", today.AddDays(-2), 0, 0, 0m) with { Model = "model-small", Success = false });
+
+        var usage = await CreateBilling().GetUsageAsync(today.AddDays(-6));
+
+        Assert.Equal("model-big", usage.FavoriteModel);
+        Assert.Equal(new[] { "model-big", "model-small" }, usage.Models.Select(m => m.Model));
+        Assert.Equal(90.0, usage.Models[0].SharePercent);
+        Assert.Equal(10.0, usage.Models[1].SharePercent);
+        Assert.Equal(2, usage.Models[1].Requests);
+
+        // A failed call with no tokens is still activity on its day.
+        Assert.Equal(2, usage.ActiveDays);
+
+        var todayRow = usage.Days[^1];
+        Assert.Equal(1000, todayRow.TotalTokens);
+        Assert.Equal(900, todayRow.Models.Single(m => m.Model == "model-big").TotalTokens);
+    }
 }

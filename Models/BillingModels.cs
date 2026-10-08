@@ -33,6 +33,12 @@ public class BillingOptions
     /// Zero means no budget is tracked. This is a monitoring aid, not an enforcement control.
     /// </summary>
     public decimal MonthlyBudget { get; set; }
+
+    /// <summary>
+    /// How far back the "All" range of the token usage panel reaches. The audit trail has no
+    /// cheap "first record" lookup, so all-time means this many days; 365 fills a year heatmap.
+    /// </summary>
+    public int UsageHistoryDays { get; set; } = 365;
 }
 
 /// <summary>Which grain a set of billing buckets is aggregated at.</summary>
@@ -275,4 +281,118 @@ public record BillingSummary
     /// <summary>Per-application totals, most expensive first.</summary>
     [JsonPropertyName("applications")]
     public List<ApplicationBilling> Applications { get; init; } = [];
+}
+
+/// <summary>Tokens one model consumed, either on one day or across the whole window.</summary>
+public record ModelUsage
+{
+    [JsonPropertyName("model")]
+    public string Model { get; init; } = string.Empty;
+
+    [JsonPropertyName("requests")]
+    public long Requests { get; init; }
+
+    [JsonPropertyName("inputTokens")]
+    public long InputTokens { get; init; }
+
+    [JsonPropertyName("outputTokens")]
+    public long OutputTokens { get; init; }
+
+    [JsonPropertyName("totalTokens")]
+    public long TotalTokens => InputTokens + OutputTokens;
+
+    /// <summary>Share of all tokens in the window, 0-100. Zero on per-day rows.</summary>
+    [JsonPropertyName("sharePercent")]
+    public double SharePercent { get; init; }
+}
+
+/// <summary>One UTC calendar day of token activity.</summary>
+public record UsageDay
+{
+    /// <summary>"2026-09-13".</summary>
+    [JsonPropertyName("date")]
+    public string Date { get; init; } = string.Empty;
+
+    [JsonPropertyName("requests")]
+    public long Requests { get; init; }
+
+    [JsonPropertyName("inputTokens")]
+    public long InputTokens { get; init; }
+
+    [JsonPropertyName("outputTokens")]
+    public long OutputTokens { get; init; }
+
+    [JsonPropertyName("totalTokens")]
+    public long TotalTokens => InputTokens + OutputTokens;
+
+    /// <summary>Per-model split of this day, largest first. Empty on a day with no usage.</summary>
+    [JsonPropertyName("models")]
+    public List<ModelUsage> Models { get; init; } = [];
+}
+
+/// <summary>
+/// Token activity rather than spend: how much the gateway was used, when, and on which
+/// models. Built from the same audit trail as <see cref="BillingSummary"/>.
+/// </summary>
+public record UsageSummary
+{
+    [JsonPropertyName("generatedAt")]
+    public DateTimeOffset GeneratedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    [JsonPropertyName("windowStart")]
+    public DateTimeOffset WindowStart { get; init; }
+
+    [JsonPropertyName("windowEnd")]
+    public DateTimeOffset WindowEnd { get; init; }
+
+    /// <summary>
+    /// Distinct caller sessions. A request made with an STS token belongs to that token's
+    /// session (its jti); a request made with a long-lived key has no session of its own, so
+    /// each caller's activity on one UTC day counts as one.
+    /// </summary>
+    [JsonPropertyName("sessions")]
+    public long Sessions { get; init; }
+
+    [JsonPropertyName("requests")]
+    public long Requests { get; init; }
+
+    [JsonPropertyName("inputTokens")]
+    public long InputTokens { get; init; }
+
+    [JsonPropertyName("outputTokens")]
+    public long OutputTokens { get; init; }
+
+    [JsonPropertyName("totalTokens")]
+    public long TotalTokens => InputTokens + OutputTokens;
+
+    /// <summary>UTC days in the window with at least one request.</summary>
+    [JsonPropertyName("activeDays")]
+    public int ActiveDays { get; init; }
+
+    /// <summary>Consecutive active days ending today (UTC). Zero when today has no requests yet.</summary>
+    [JsonPropertyName("currentStreakDays")]
+    public int CurrentStreakDays { get; init; }
+
+    [JsonPropertyName("longestStreakDays")]
+    public int LongestStreakDays { get; init; }
+
+    /// <summary>Hour of day (0-23, UTC) with the most requests, or null with no requests.</summary>
+    [JsonPropertyName("peakHourUtc")]
+    public int? PeakHourUtc { get; init; }
+
+    /// <summary>Request count for each hour of the day, UTC, index 0 = 00:00.</summary>
+    [JsonPropertyName("requestsByHourUtc")]
+    public long[] RequestsByHourUtc { get; init; } = new long[24];
+
+    /// <summary>Model with the most tokens in the window, or null with no usage.</summary>
+    [JsonPropertyName("favoriteModel")]
+    public string? FavoriteModel { get; init; }
+
+    /// <summary>Every UTC day in the window, including ones with no usage, oldest first.</summary>
+    [JsonPropertyName("days")]
+    public List<UsageDay> Days { get; init; } = [];
+
+    /// <summary>Per-model totals across the window, most tokens first.</summary>
+    [JsonPropertyName("models")]
+    public List<ModelUsage> Models { get; init; } = [];
 }

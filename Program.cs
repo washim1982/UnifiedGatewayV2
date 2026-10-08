@@ -44,14 +44,14 @@ var oktaOptions = builder.Configuration
     .Get<OktaOptions>() ?? new OktaOptions();
 
 // Refuse to start on an insecure configuration rather than starting insecure.
-// "urls" is where the host lands ASPNETCORE_URLS, --urls and launchSettings' applicationUrl,
-// so the validator sees what this process will actually listen on.
+// The validator sees every listen address configuration can give this process: urls
+// (ASPNETCORE_URLS, --urls, launchSettings), HTTP_PORTS / HTTPS_PORTS and Kestrel:Endpoints.
 StartupValidator.Validate(
     gatewayOptions,
     cloudOptions,
     builder.Environment,
     oktaOptions,
-    builder.Configuration["urls"]);
+    StartupValidator.CollectListenUrls(builder.Configuration));
 
 // ---------------------------------------------------------------------------
 // 2. Cloud provider binding — the single switch between TEST and PROD
@@ -175,7 +175,7 @@ builder.Services.AddSingleton(_ =>
 var retryPolicy = LocalProviderResilience.BuildRetryPolicy();
 var noRetryPolicy = Policy.NoOpAsync<HttpResponseMessage>();
 
-void AddLocalProviderClient(string name, string baseUrl, int timeoutSeconds)
+void AddLocalProviderClient(string name, string baseUrl, int timeoutSeconds, string apiKeySecretName)
 {
     var circuitBreaker = LocalProviderResilience.BuildCircuitBreaker();
 
@@ -186,12 +186,16 @@ void AddLocalProviderClient(string name, string baseUrl, int timeoutSeconds)
     })
     .AddPolicyHandler(request =>
         LocalProviderResilience.IsRetryable(request) ? retryPolicy : noRetryPolicy)
-    .AddPolicyHandler(circuitBreaker);
+    .AddPolicyHandler(circuitBreaker)
+    // Innermost, so a retried request carries the backend credential too (SEC-14).
+    .AddHttpMessageHandler(services =>
+        new LocalBackendAuthHandler(services.GetRequiredService<ISecretsProvider>(), apiKeySecretName));
 }
 
-AddLocalProviderClient("OllamaClient", gatewayOptions.LocalProviders.Ollama.BaseUrl, gatewayOptions.LocalProviders.Ollama.TimeoutSeconds);
-AddLocalProviderClient("LmStudioClient", gatewayOptions.LocalProviders.LmStudio.BaseUrl, gatewayOptions.LocalProviders.LmStudio.TimeoutSeconds);
-AddLocalProviderClient("LlamaCppClient", gatewayOptions.LocalProviders.LlamaCpp.BaseUrl, gatewayOptions.LocalProviders.LlamaCpp.TimeoutSeconds);
+var localProviders = gatewayOptions.LocalProviders;
+AddLocalProviderClient("OllamaClient", localProviders.Ollama.BaseUrl, localProviders.Ollama.TimeoutSeconds, localProviders.Ollama.ApiKeySecretName);
+AddLocalProviderClient("LmStudioClient", localProviders.LmStudio.BaseUrl, localProviders.LmStudio.TimeoutSeconds, localProviders.LmStudio.ApiKeySecretName);
+AddLocalProviderClient("LlamaCppClient", localProviders.LlamaCpp.BaseUrl, localProviders.LlamaCpp.TimeoutSeconds, localProviders.LlamaCpp.ApiKeySecretName);
 
 // ---------------------------------------------------------------------------
 // 4. Core gateway services
@@ -301,17 +305,24 @@ var invokeLimit = gatewayOptions.Security.RateLimitPerMinute <= 0 ? 120 : gatewa
 var tokenLimit = gatewayOptions.Security.TokenRateLimitPerMinute <= 0 ? 10 : gatewayOptions.Security.TokenRateLimitPerMinute;
 var managementLimit = gatewayOptions.Security.ManagementRateLimitPerMinute <= 0 ? 60 : gatewayOptions.Security.ManagementRateLimitPerMinute;
 
+// Per-application quotas, applied by the endpoints once a credential validates (SEC-03).
+builder.Services.AddSingleton<ICallerQuota, CallerQuota>();
+
 builder.Services.AddRateLimiter(rl =>
 {
     rl.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
+    // These limiters run before authentication, so every partition is the client address: a key,
+    // token or appId the caller writes cannot pick a fresh bucket (SEC-03).
+    var perAddressFloor = Math.Max(invokeLimit, managementLimit) * 2;
+
     // A global floor, so an endpoint that forgets to name a policy is still bounded.
     rl.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: ResolveRatePartition(httpContext),
+            partitionKey: RateLimitPartitions.ForClient(httpContext),
             factory: _ => new FixedWindowRateLimiterOptions
             {
-                PermitLimit = Math.Max(invokeLimit, managementLimit) * 2,
+                PermitLimit = perAddressFloor,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0
             }));
@@ -319,7 +330,7 @@ builder.Services.AddRateLimiter(rl =>
     void AddFixedWindowPolicy(string name, int permitLimit) =>
         rl.AddPolicy(name, httpContext =>
             RateLimitPartition.GetFixedWindowLimiter(
-                partitionKey: ResolveRatePartition(httpContext),
+                partitionKey: RateLimitPartitions.ForClient(httpContext),
                 factory: _ => new FixedWindowRateLimiterOptions
                 {
                     PermitLimit = permitLimit,
@@ -327,7 +338,10 @@ builder.Services.AddRateLimiter(rl =>
                     QueueLimit = 0
                 }));
 
-    AddFixedWindowPolicy("per-app", invokeLimit);
+    // One address may front several applications, so invocation is bounded per address at the
+    // floor, and per application at RateLimitPerMinute by ICallerQuota.
+    AddFixedWindowPolicy("per-app", perAddressFloor);
+    // Issuance stays tight per address: it is where a key would be guessed.
     AddFixedWindowPolicy("token-issuance", tokenLimit);
     AddFixedWindowPolicy("management", managementLimit);
 
@@ -396,6 +410,13 @@ var app = builder.Build();
 // ---------------------------------------------------------------------------
 // 9. Middleware pipeline
 // ---------------------------------------------------------------------------
+// Development drops the transport and authentication checks and auto-grants IAM roles, so it
+// answers this machine only, however the host was bound (SEC-13).
+if (app.Environment.IsDevelopment())
+{
+    app.UseMiddleware<DevelopmentLoopbackMiddleware>();
+}
+
 if (gatewayOptions.Security.RequireHttps)
 {
     // API calls over plain HTTP are refused before anything else sees them; only what is
@@ -481,28 +502,5 @@ app.MapGet("/status", () => Results.Ok(new
 }));
 
 app.Run();
-
-// Partition rate limiting by caller: presented credential (hashed), else appId, else IP.
-static string ResolveRatePartition(HttpContext ctx)
-{
-    var key = ctx.Request.Headers["X-API-Key"].ToString();
-    if (string.IsNullOrWhiteSpace(key))
-    {
-        var auth = ctx.Request.Headers.Authorization.ToString();
-        key = auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? auth[7..] : auth;
-    }
-
-    if (!string.IsNullOrWhiteSpace(key))
-    {
-        var hash = Convert.ToHexString(
-            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(key.Trim())));
-        return "k:" + hash[..16];
-    }
-
-    if (ctx.Request.RouteValues.TryGetValue("appId", out var appId) && appId is string s && !string.IsNullOrWhiteSpace(s))
-        return "a:" + s;
-
-    return "ip:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown");
-}
 
 public partial class Program { }

@@ -248,6 +248,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadMetrics();
       } else if (tab === 'billing') {
         loadBilling();
+        loadUsage();
       } else if (tab === 'guardrails') {
         loadGuardrailConfig();
       }
@@ -1617,6 +1618,241 @@ Write-Output $response.output`;
     });
   }
 
+  // --- Token usage -----------------------------------------------------------
+
+  // Categorical slots stepped for the dark surface, in fixed order. A model keeps the slot
+  // it was first given for the life of the page, so changing range never repaints it.
+  const MODEL_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
+  const OTHER_COLOR = '#6b6b66';
+  // One hue, dark to light: on a dark surface the busiest days are the brightest.
+  const HEAT_LEVELS = ['#1c5cab', '#2a78d6', '#5598e7', '#9ec5f4'];
+  // War and Peace runs to about 587K words, which is roughly 730K tokens.
+  const WAR_AND_PEACE_TOKENS = 730000;
+
+  let usageRange = 'all';
+  const modelSlots = new Map();
+
+  function modelColor(model) {
+    if (!modelSlots.has(model)) {
+      if (modelSlots.size >= MODEL_COLORS.length) return OTHER_COLOR;
+      modelSlots.set(model, MODEL_COLORS[modelSlots.size]);
+    }
+    return modelSlots.get(model);
+  }
+
+  function hourLabel(h) {
+    return (h % 12 || 12) + (h < 12 ? ' AM' : ' PM');
+  }
+
+  function utcDay(date, opts) {
+    return new Date(date + 'T00:00:00Z').toLocaleDateString(undefined, Object.assign({ timeZone: 'UTC' }, opts));
+  }
+
+  function scrollUsageToLatest() {
+    // Hidden elements have no scroll width, so this also runs when a view is shown.
+    document.querySelectorAll('#pane-billing .heatmap-wrap, #pane-billing .uc-scroll')
+      .forEach(el => { el.scrollLeft = el.scrollWidth; });
+  }
+
+  async function loadUsage() {
+    try {
+      const res = await apiFetch('/api/billing/usage?range=' + encodeURIComponent(usageRange));
+      if (!res.ok) return;
+
+      const u = await res.json();
+      renderUsageTiles(u);
+      renderHeatmap(u);
+      renderModelUsage(u);
+      scrollUsageToLatest();
+    } catch (e) {
+      console.error('Failed to load token usage', e);
+    }
+  }
+
+  function renderUsageTiles(u) {
+    const days = (u.days || []).length;
+    setText('usage-window', 'last ' + days + ' day' + (days === 1 ? '' : 's') + ' · UTC');
+
+    setText('usage-sessions', (Number(u.sessions) || 0).toLocaleString());
+    setText('usage-requests', (Number(u.requests) || 0).toLocaleString());
+    setText('usage-tokens', compact(u.totalTokens));
+    setText('usage-active-days', String(u.activeDays || 0));
+    setText('usage-current-streak', (u.currentStreakDays || 0) + 'd');
+    setText('usage-longest-streak', (u.longestStreakDays || 0) + 'd');
+    setText('usage-peak-hour', u.peakHourUtc === null || u.peakHourUtc === undefined
+      ? '—' : hourLabel(u.peakHourUtc) + ' UTC');
+    setText('usage-favorite-model', u.favoriteModel || '—');
+
+    // Bedrock model ids are long; the tile truncates, the tooltip keeps the whole id.
+    const favorite = document.getElementById('usage-favorite-model');
+    if (favorite) favorite.title = u.favoriteModel || '';
+
+    const ratio = (Number(u.totalTokens) || 0) / WAR_AND_PEACE_TOKENS;
+    setText('usage-fun',
+      ratio >= 2 ? 'This gateway has processed ~' + Math.round(ratio) + '× the tokens in War and Peace.' :
+      ratio > 0 ? 'This gateway has processed about ' + Math.max(1, Math.round(ratio * 100)) + '% of the tokens in War and Peace.' :
+      'No token usage in this window.');
+  }
+
+  function renderHeatmap(u) {
+    const host = document.getElementById('usage-heatmap');
+    if (!host) return;
+    host.innerHTML = '';
+
+    const days = u.days || [];
+    if (days.length === 0) return;
+
+    // Levels come from quartiles of the active days, so one enormous day does not wash
+    // every other day down to the faintest step.
+    const active = days.map(d => Number(d.totalTokens) || 0).filter(v => v > 0).sort((a, b) => a - b);
+    const cut = q => active[Math.min(active.length - 1, Math.floor(active.length * q))];
+    const bounds = active.length ? [cut(0.25), cut(0.5), cut(0.75)] : [];
+
+    // Pad the first week so every row is the same weekday (Monday first, as ISO weeks are).
+    const lead = (new Date(days[0].date + 'T00:00:00Z').getUTCDay() + 6) % 7;
+    for (let i = 0; i < lead; i++) {
+      const pad = document.createElement('span');
+      pad.className = 'heat-cell is-pad';
+      host.appendChild(pad);
+    }
+
+    days.forEach(d => {
+      const tokens = Number(d.totalTokens) || 0;
+      const cell = document.createElement('span');
+      cell.className = 'heat-cell';
+      if (tokens > 0) {
+        const level = bounds.findIndex(b => tokens <= b);
+        cell.style.background = HEAT_LEVELS[level === -1 ? 3 : level];
+      }
+      cell.title = utcDay(d.date, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) +
+        '\n' + compact(tokens) + ' tokens · ' + (Number(d.requests) || 0).toLocaleString() + ' requests';
+      host.appendChild(cell);
+    });
+
+    host.setAttribute('aria-label', 'Daily token activity: ' + (u.activeDays || 0) + ' active days out of ' + days.length);
+  }
+
+  function niceCeil(value) {
+    // Fine steps, so the tallest column fills most of the plot rather than half of it.
+    const pow = Math.pow(10, Math.floor(Math.log10(value)));
+    return [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => m * pow).find(v => v >= value);
+  }
+
+  function renderModelUsage(u) {
+    const chart = document.getElementById('usage-model-chart');
+    const legend = document.getElementById('usage-model-legend');
+    if (!chart || !legend) return;
+    chart.innerHTML = '';
+    legend.innerHTML = '';
+
+    const models = u.models || [];
+    if (models.length === 0 || !(Number(u.totalTokens) > 0)) {
+      chart.innerHTML = '<div class="spend-empty" style="grid-column:1/-1">No token usage in this window.</div>';
+      return;
+    }
+
+    // Eight series at most. Past that the tail folds into Other rather than inventing hues.
+    const named = models.slice(0, models.length > MODEL_COLORS.length ? MODEL_COLORS.length - 1 : models.length);
+    const namedIds = new Set(named.map(m => m.model));
+    const tail = models.filter(m => !namedIds.has(m.model));
+    named.forEach(m => modelColor(m.model));
+
+    // Start at the first day with usage: a year of empty columns ahead of it says nothing.
+    let days = u.days || [];
+    const first = days.findIndex(d => d.requests > 0);
+    if (first > 0) days = days.slice(Math.min(first, Math.max(0, days.length - 7)));
+
+    const top = niceCeil(Math.max(1, ...days.map(d => Number(d.totalTokens) || 0)));
+    const PLOT_PX = 180;
+
+    const yaxis = document.createElement('div');
+    yaxis.className = 'uc-yaxis';
+    const scroll = document.createElement('div');
+    scroll.className = 'uc-scroll';
+    const plot = document.createElement('div');
+    plot.className = 'uc-plot';
+    const xlabels = document.createElement('div');
+    xlabels.className = 'uc-xlabels';
+
+    [0, 0.5, 1].forEach(f => {
+      const label = document.createElement('span');
+      label.style.bottom = (f * 100) + '%';
+      // Axis ticks are round numbers: "5M", not "5.00M".
+      label.textContent = compact(top * f).replace(/\.0+(?=[KMB]$)/, '');
+      yaxis.appendChild(label);
+
+      const grid = document.createElement('div');
+      grid.className = 'uc-grid';
+      grid.style.bottom = (f * 100) + '%';
+      plot.appendChild(grid);
+    });
+
+    const labelEvery = Math.max(1, Math.ceil(days.length / 10));
+
+    days.forEach((d, i) => {
+      const col = document.createElement('div');
+      col.className = 'uc-col';
+
+      const perModel = d.models || [];
+      const segments = named
+        .map(m => {
+          const hit = perModel.find(x => x.model === m.model);
+          return { name: m.model, tokens: hit ? Number(hit.totalTokens) || 0 : 0, color: modelColor(m.model) };
+        })
+        .concat([{
+          name: 'Other',
+          tokens: perModel.filter(x => !namedIds.has(x.model)).reduce((s, x) => s + (Number(x.totalTokens) || 0), 0),
+          color: OTHER_COLOR
+        }])
+        .filter(s => s.tokens > 0);
+
+      segments.forEach(s => {
+        const seg = document.createElement('div');
+        seg.className = 'uc-seg';
+        seg.style.height = Math.max(1, (s.tokens / top) * PLOT_PX) + 'px';
+        seg.style.background = s.color;
+        col.appendChild(seg);
+      });
+
+      col.title = utcDay(d.date, { weekday: 'short', month: 'short', day: 'numeric' }) +
+        ' · ' + compact(d.totalTokens) + ' tokens' +
+        segments.map(s => '\n' + s.name + ': ' + compact(s.tokens)).join('');
+      plot.appendChild(col);
+
+      const x = document.createElement('span');
+      x.textContent = i % labelEvery === 0 ? utcDay(d.date, { month: 'short', day: 'numeric' }) : '';
+      xlabels.appendChild(x);
+    });
+
+    scroll.appendChild(plot);
+    scroll.appendChild(xlabels);
+    chart.appendChild(yaxis);
+    chart.appendChild(scroll);
+
+    const legendRows = named.map(m => ({
+      name: m.model, color: modelColor(m.model),
+      inputTokens: m.inputTokens, outputTokens: m.outputTokens, share: m.sharePercent
+    }));
+    if (tail.length > 0) {
+      legendRows.push({
+        name: 'Other (' + tail.length + ' models)', color: OTHER_COLOR,
+        inputTokens: tail.reduce((s, m) => s + (Number(m.inputTokens) || 0), 0),
+        outputTokens: tail.reduce((s, m) => s + (Number(m.outputTokens) || 0), 0),
+        share: tail.reduce((s, m) => s + (Number(m.sharePercent) || 0), 0)
+      });
+    }
+
+    legendRows.forEach(r => {
+      const li = document.createElement('li');
+      li.innerHTML =
+        '<span class="lg-swatch" style="background:' + r.color + '"></span>' +
+        '<span class="lg-name" title="' + escapeHtml(r.name) + '">' + escapeHtml(r.name) + '</span>' +
+        '<span class="lg-io">' + compact(r.inputTokens) + ' in · ' + compact(r.outputTokens) + ' out</span>' +
+        '<span class="lg-share">' + (Number(r.share) || 0).toFixed(1) + '%</span>';
+      legend.appendChild(li);
+    });
+  }
+
   // --- Controls --------------------------------------------------------------
 
   document.querySelectorAll('#pane-billing .seg-btn[data-range]').forEach(btn => {
@@ -1667,7 +1903,27 @@ Write-Output $response.output`;
   });
 
   const billingRefresh = document.getElementById('btn-billing-refresh');
-  if (billingRefresh) billingRefresh.addEventListener('click', loadBilling);
+  if (billingRefresh) billingRefresh.addEventListener('click', () => { loadBilling(); loadUsage(); });
+
+  document.querySelectorAll('#pane-billing .seg-btn[data-usage-range]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#pane-billing .seg-btn[data-usage-range]')
+        .forEach(b => b.classList.toggle('active', b === btn));
+      usageRange = btn.dataset.usageRange;
+      loadUsage();
+    });
+  });
+
+  document.querySelectorAll('#pane-billing .seg-btn[data-usage-view]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#pane-billing .seg-btn[data-usage-view]')
+        .forEach(b => b.classList.toggle('active', b === btn));
+      const view = btn.dataset.usageView;
+      document.getElementById('usage-overview').hidden = view !== 'overview';
+      document.getElementById('usage-models').hidden = view !== 'models';
+      scrollUsageToLatest();
+    });
+  });
 
   const copyEndpoint = document.getElementById('btn-copy-billing-endpoint');
   if (copyEndpoint) {

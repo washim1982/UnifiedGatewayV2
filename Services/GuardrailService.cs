@@ -84,6 +84,14 @@ public partial class GuardrailService : IGuardrailService
             });
         }
 
+        // Redaction removes only the spans a detector reported, and a scan that timed out reported
+        // none, so redacting would release content nobody inspected. Only AuditOnly, which never
+        // alters traffic, lets an incomplete scan through (SEC-04).
+        if (ScanWasIncomplete(violations) && activeMode != GuardrailActionMode.AuditOnly)
+        {
+            activeMode = GuardrailActionMode.Block;
+        }
+
         _logger.LogWarning("Guardrails detected {Count} policy violations. ActiveMode={ActiveMode}, MaxSeverity={MaxSeverity}",
             violations.Count, activeMode, violations.Max(v => v.Severity));
 
@@ -186,6 +194,12 @@ public partial class GuardrailService : IGuardrailService
             });
         }
 
+        // An output the scanner could not finish reading is withheld, not released as "redacted" (SEC-04).
+        if (ScanWasIncomplete(violations) && activeMode != GuardrailActionMode.AuditOnly)
+        {
+            activeMode = GuardrailActionMode.Block;
+        }
+
         _logger.LogWarning("Egress guardrails detected {Count} sensitive-data leaks in model output. ActiveMode={ActiveMode}",
             violations.Count, activeMode);
 
@@ -269,7 +283,11 @@ public partial class GuardrailService : IGuardrailService
         }
     }
 
-    private List<GuardrailViolationDetail> RunDetectorsCore(
+    private static bool ScanWasIncomplete(List<GuardrailViolationDetail> violations) =>
+        violations.Any(v => v.RuleName == "ScanTimeout");
+
+    /// <summary>Virtual so a test can force a scan timeout deterministically.</summary>
+    protected virtual List<GuardrailViolationDetail> RunDetectorsCore(
         string text,
         GuardrailOptions current,
         bool scanPci,
@@ -579,6 +597,12 @@ public partial class GuardrailService : IGuardrailService
         }
     }
 
+    // The gateway's own STS token: "ug_sts_" + base64url payload + "." + base64url HMAC. Either
+    // segment may end in '-' or '_', so a word boundary cannot delimit it, and it has one dot,
+    // so the JWT detector never sees it (SEC-07).
+    [GeneratedRegex(@"(?<![A-Za-z0-9_-])ug_sts_[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
+    private static partial Regex GatewayStsTokenRegex();
+
     private void DetectGenericApiKeys(string input, List<GuardrailViolationDetail> violations)
     {
         var matches = GenericApiKeyRegex().Matches(input);
@@ -590,6 +614,20 @@ public partial class GuardrailService : IGuardrailService
                 RuleName = "ApiKeyToken",
                 Severity = "Critical",
                 Description = "High-entropy API Key / Personal Access Token detected.",
+                DetectedSnippet = MaskDisplay(match.Value),
+                StartIndex = match.Index,
+                Length = match.Length
+            });
+        }
+
+        foreach (Match match in GatewayStsTokenRegex().Matches(input))
+        {
+            violations.Add(new GuardrailViolationDetail
+            {
+                Category = "Secrets",
+                RuleName = "GatewayStsToken",
+                Severity = "Critical",
+                Description = "Unified Gateway STS bearer token detected.",
                 DetectedSnippet = MaskDisplay(match.Value),
                 StartIndex = match.Index,
                 Length = match.Length
@@ -610,57 +648,48 @@ public partial class GuardrailService : IGuardrailService
     [GeneratedRegex(@"(?i)\b(?:bypass|disable|turn\s+off)\s+(?:all\s+)?(?:safety|content\s+filter|guardrails?|policy)\b", RegexOptions.Compiled, matchTimeoutMilliseconds: 250)]
     private static partial Regex BypassSafetyRegex();
 
-    private void DetectPromptInjection(string input, List<GuardrailViolationDetail> violations, PromptInjectionOptions options)
+    private static void DetectPromptInjection(string input, List<GuardrailViolationDetail> violations, PromptInjectionOptions options)
     {
         if (options.BlockSystemOverrides)
         {
-            var match1 = SystemOverrideRegex().Match(input);
-            if (match1.Success)
-            {
-                violations.Add(new GuardrailViolationDetail
-                {
-                    Category = "PromptInjection",
-                    RuleName = "SystemPromptOverride",
-                    Severity = "High",
-                    Description = "Attempt to override or ignore system instructions detected.",
-                    DetectedSnippet = match1.Value,
-                    StartIndex = match1.Index,
-                    Length = match1.Length
-                });
-            }
+            AddInjectionMatches(SystemOverrideRegex(), input, violations, "SystemPromptOverride", "High",
+                "Attempt to override or ignore system instructions detected.");
 
-            var matchBypass = BypassSafetyRegex().Match(input);
-            if (matchBypass.Success)
-            {
-                violations.Add(new GuardrailViolationDetail
-                {
-                    Category = "PromptInjection",
-                    RuleName = "SafetyBypassAttempt",
-                    Severity = "High",
-                    Description = "Attempt to disable safety policies or guardrails detected.",
-                    DetectedSnippet = matchBypass.Value,
-                    StartIndex = matchBypass.Index,
-                    Length = matchBypass.Length
-                });
-            }
+            AddInjectionMatches(BypassSafetyRegex(), input, violations, "SafetyBypassAttempt", "High",
+                "Attempt to disable safety policies or guardrails detected.");
         }
 
         if (options.BlockJailbreaks)
         {
-            var match2 = JailbreakDanRegex().Match(input);
-            if (match2.Success)
+            AddInjectionMatches(JailbreakDanRegex(), input, violations, "Jailbreak_DAN", "Critical",
+                "Adversarial jailbreak pattern (DAN / Developer Mode) detected.");
+        }
+    }
+
+    /// <summary>
+    /// Records every occurrence, not just the first: redaction removes only the spans reported
+    /// here, so a repeated instruction would otherwise reach the model intact (SEC-08).
+    /// </summary>
+    private static void AddInjectionMatches(
+        Regex pattern,
+        string input,
+        List<GuardrailViolationDetail> violations,
+        string ruleName,
+        string severity,
+        string description)
+    {
+        foreach (Match match in pattern.Matches(input))
+        {
+            violations.Add(new GuardrailViolationDetail
             {
-                violations.Add(new GuardrailViolationDetail
-                {
-                    Category = "PromptInjection",
-                    RuleName = "Jailbreak_DAN",
-                    Severity = "Critical",
-                    Description = "Adversarial jailbreak pattern (DAN / Developer Mode) detected.",
-                    DetectedSnippet = match2.Value,
-                    StartIndex = match2.Index,
-                    Length = match2.Length
-                });
-            }
+                Category = "PromptInjection",
+                RuleName = ruleName,
+                Severity = severity,
+                Description = description,
+                DetectedSnippet = match.Value,
+                StartIndex = match.Index,
+                Length = match.Length
+            });
         }
     }
 
@@ -691,7 +720,8 @@ public partial class GuardrailService : IGuardrailService
                          v.RuleName.Contains("Phone") ? "[REDACTED_PHONE]" : "[REDACTED_PASSPORT]",
                 "Secrets" => v.RuleName.Contains("AWS") ? "[REDACTED_AWS_KEY]" :
                              v.RuleName.Contains("Private") ? "[REDACTED_PRIVATE_KEY]" :
-                             v.RuleName.Contains("JWT") ? "[REDACTED_JWT]" : "[REDACTED_API_KEY]",
+                             v.RuleName.Contains("JWT") ? "[REDACTED_JWT]" :
+                             v.RuleName.Contains("GatewaySts") ? "[REDACTED_GATEWAY_TOKEN]" : "[REDACTED_API_KEY]",
                 "PromptInjection" => "[REDACTED_INJECTION_ATTEMPT]",
                 _ => "[REDACTED_SENSITIVE_DATA]"
             };

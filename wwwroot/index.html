@@ -559,6 +559,57 @@
 
         </div>
 
+        <!-- Token usage ---------------------------------------------------- -->
+        <div class="section-rule">
+          <h3>Token usage</h3>
+          <span id="usage-window">&mdash;</span>
+        </div>
+
+        <div class="panel usage-panel">
+          <div class="panel-head">
+            <div class="seg seg-sm" role="group" aria-label="Usage view">
+              <button class="seg-btn active" data-usage-view="overview">Overview</button>
+              <button class="seg-btn" data-usage-view="models">Models</button>
+            </div>
+            <div class="seg seg-sm" role="group" aria-label="Usage range">
+              <button class="seg-btn active" data-usage-range="all">All</button>
+              <button class="seg-btn" data-usage-range="30d">30d</button>
+              <button class="seg-btn" data-usage-range="7d">7d</button>
+            </div>
+          </div>
+
+          <div id="usage-overview">
+            <div class="usage-tiles">
+              <div class="usage-tile"><span class="panel-label">Sessions</span><strong id="usage-sessions">0</strong></div>
+              <div class="usage-tile"><span class="panel-label">Requests</span><strong id="usage-requests">0</strong></div>
+              <div class="usage-tile"><span class="panel-label">Total tokens</span><strong id="usage-tokens">0</strong></div>
+              <div class="usage-tile"><span class="panel-label">Active days</span><strong id="usage-active-days">0</strong></div>
+              <div class="usage-tile"><span class="panel-label">Current streak</span><strong id="usage-current-streak">0d</strong></div>
+              <div class="usage-tile"><span class="panel-label">Longest streak</span><strong id="usage-longest-streak">0d</strong></div>
+              <div class="usage-tile"><span class="panel-label">Peak hour</span><strong id="usage-peak-hour">&mdash;</strong></div>
+              <div class="usage-tile"><span class="panel-label">Favorite model</span><strong id="usage-favorite-model">&mdash;</strong></div>
+            </div>
+            <div class="heatmap-wrap"><div class="heatmap" id="usage-heatmap" role="img" aria-label="Daily token activity"></div></div>
+            <div class="heat-foot">
+              <span class="panel-note" id="usage-fun"></span>
+              <span class="heat-scale" aria-hidden="true">
+                Less
+                <span class="heat-cell"></span>
+                <span class="heat-cell" style="background:#1c5cab"></span>
+                <span class="heat-cell" style="background:#2a78d6"></span>
+                <span class="heat-cell" style="background:#5598e7"></span>
+                <span class="heat-cell" style="background:#9ec5f4"></span>
+                More
+              </span>
+            </div>
+          </div>
+
+          <div id="usage-models" hidden>
+            <div class="usage-chart" id="usage-model-chart"></div>
+            <ul class="usage-legend" id="usage-model-legend"></ul>
+          </div>
+        </div>
+
         <!-- Analytics ------------------------------------------------------ -->
         <div class="section-rule">
           <h3>Token &amp; cost analytics</h3>

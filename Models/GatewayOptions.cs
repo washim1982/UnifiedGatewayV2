@@ -59,6 +59,12 @@ public class OllamaOptions
     public string BaseUrl { get; set; } = "http://localhost:11434";
     public int TimeoutSeconds { get; set; } = 120;
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Secret holding the bearer credential sent to this backend. Outside Development a backend
+    /// that is not on this host must set it and use HTTPS (SEC-14).
+    /// </summary>
+    public string ApiKeySecretName { get; set; } = string.Empty;
 }
 
 public class LmStudioOptions
@@ -66,6 +72,9 @@ public class LmStudioOptions
     public string BaseUrl { get; set; } = "http://localhost:1234";
     public int TimeoutSeconds { get; set; } = 120;
     public bool Enabled { get; set; } = true;
+
+    /// <inheritdoc cref="OllamaOptions.ApiKeySecretName"/>
+    public string ApiKeySecretName { get; set; } = string.Empty;
 }
 
 public class LlamaCppOptions
@@ -73,6 +82,9 @@ public class LlamaCppOptions
     public string BaseUrl { get; set; } = "http://localhost:8080";
     public int TimeoutSeconds { get; set; } = 120;
     public bool Enabled { get; set; } = true;
+
+    /// <inheritdoc cref="OllamaOptions.ApiKeySecretName"/>
+    public string ApiKeySecretName { get; set; } = string.Empty;
 }
 
 public class SecurityOptions

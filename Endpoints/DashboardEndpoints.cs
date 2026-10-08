@@ -335,6 +335,28 @@ public static class DashboardEndpoints
         .WithSummary("Account billing summary and per-application breakdown (grain: daily, weekly, monthly)")
         .RequireIamAction("ReadBilling");
 
+        group.MapGet("/billing/usage", async (
+            [FromQuery] string? range,
+            [FromQuery] DateTimeOffset? from,
+            [FromQuery] DateTimeOffset? to,
+            IBillingService billing,
+            CancellationToken ct) =>
+        {
+            // "all" (or no range) leaves the window to Billing:UsageHistoryDays.
+            var now = DateTimeOffset.UtcNow;
+            var windowFrom = from ?? (range ?? string.Empty).Trim().ToLowerInvariant() switch
+            {
+                "7d" => now.AddDays(-6),
+                "30d" => now.AddDays(-29),
+                _ => (DateTimeOffset?)null
+            };
+
+            return Results.Ok(await billing.GetUsageAsync(windowFrom, to, ct));
+        })
+        .WithName("GetTokenUsage")
+        .WithSummary("Token activity: sessions, requests, streaks, peak hour, daily and per-model tokens (range: all, 30d, 7d)")
+        .RequireIamAction("ReadBilling");
+
         group.MapGet("/billing/applications/{appId}", async (
             string appId,
             [FromQuery] string? grain,
@@ -423,6 +445,16 @@ public static class DashboardEndpoints
             IApplicationRegistryService registry,
             CancellationToken ct) =>
         {
+            // Native Bedrock guardrails are not wired into invocation; accepting the switch would
+            // report a protection that never runs (SEC-05).
+            if (options.BedrockGuardrails?.Enabled == true)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "Native Bedrock guardrails are not supported by this gateway. Set bedrockGuardrails.enabled to false."
+                });
+            }
+
             var previous = guardrailService.GetCurrentOptions();
 
             // Record the policy change before applying it. A guardrail switched off silently

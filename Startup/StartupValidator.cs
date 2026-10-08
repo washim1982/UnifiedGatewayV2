@@ -126,6 +126,17 @@ public static partial class StartupValidator
                 "Enable it and grant access through the policy document.");
         }
 
+        // --- Native Bedrock guardrails -------------------------------------------
+        // The switch is configurable, but no invocation passes a guardrail identifier to
+        // Bedrock, so turning it on would promise provider-side filtering that never runs.
+        // Refuse it in every environment until the invocation is wired (SEC-05).
+        if (gateway.Guardrails?.BedrockGuardrails?.Enabled == true)
+        {
+            failures.Add(
+                "Gateway:Guardrails:BedrockGuardrails:Enabled is true, but native Bedrock guardrails are " +
+                "not applied to model invocations. Leave it false; the gateway's own guardrails still run.");
+        }
+
         // --- Development reachability -----------------------------------------
         // Development is exempt from the transport and authentication rules above because it
         // is assumed to be a developer's loopback. The local IAM simulator grants every role
@@ -193,6 +204,11 @@ public static partial class StartupValidator
 
         ValidateAwsIdentity(cloud, failures);
         ValidateOkta(okta ?? new OktaOptions(), environment, isDevelopment, failures);
+
+        if (!isDevelopment)
+        {
+            ValidateLocalProviders(gateway.LocalProviders ?? new LocalProvidersOptions(), failures);
+        }
 
         // --- Bedrock ------------------------------------------------------------
         // Bedrock resolves independently of the global provider so that Development can run
@@ -484,6 +500,92 @@ public static partial class StartupValidator
             case CertificateSource.PfxFile when string.IsNullOrWhiteSpace(certificate.PfxPath):
                 failures.Add("Gateway:Aws:RolesAnywhere:Certificate:PfxPath is required when Source is 'PfxFile'.");
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Every listen address configuration can give the host, as one "a;b" list: urls
+    /// (ASPNETCORE_URLS, --urls, launchSettings' applicationUrl), the HTTP_PORTS and HTTPS_PORTS
+    /// settings, which bind every interface, and Kestrel:Endpoints (SEC-13). An IIS site binding
+    /// is invisible here, which is why Development also refuses non-local requests at runtime.
+    /// </summary>
+    public static string CollectListenUrls(IConfiguration configuration)
+    {
+        var urls = ParseUrls(configuration["urls"]).ToList();
+
+        foreach (var (setting, scheme) in new[] { ("http_ports", "http"), ("https_ports", "https") })
+        {
+            urls.AddRange(ParseUrls(configuration[setting]).Select(port => $"{scheme}://*:{port}"));
+        }
+
+        urls.AddRange(configuration.GetSection("Kestrel:Endpoints").GetChildren()
+            .Select(endpoint => endpoint["Url"])
+            .OfType<string>()
+            .Where(url => url.Length > 0));
+
+        return string.Join(';', urls);
+    }
+
+    /// <summary>
+    /// On-prem model backends receive prompts and system prompts. A backend that is not on this
+    /// host must be reached over HTTPS and must require a credential: otherwise anyone on the
+    /// path reads the prompts, and anyone who can reach the backend calls it around the gateway's
+    /// authentication, guardrails and metering (SEC-14). Applied outside Development only.
+    /// </summary>
+    private static void ValidateLocalProviders(LocalProvidersOptions providers, List<string> failures)
+    {
+        var backends = new (string Name, bool Enabled, string BaseUrl, string SecretName)[]
+        {
+            ("Ollama", providers.Ollama.Enabled, providers.Ollama.BaseUrl, providers.Ollama.ApiKeySecretName),
+            ("LmStudio", providers.LmStudio.Enabled, providers.LmStudio.BaseUrl, providers.LmStudio.ApiKeySecretName),
+            ("LlamaCpp", providers.LlamaCpp.Enabled, providers.LlamaCpp.BaseUrl, providers.LlamaCpp.ApiKeySecretName)
+        };
+
+        foreach (var (name, enabled, baseUrl, secretName) in backends)
+        {
+            if (!enabled)
+            {
+                continue;
+            }
+
+            var setting = $"Gateway:LocalProviders:{name}";
+
+            if (IsPlaceholder(baseUrl))
+            {
+                failures.Add($"{setting}:BaseUrl still contains a placeholder ('{baseUrl}').");
+                continue;
+            }
+
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                failures.Add($"{setting}:BaseUrl is not an absolute HTTP or HTTPS URL ('{baseUrl}').");
+                continue;
+            }
+
+            if (uri.IsLoopback)
+            {
+                continue;
+            }
+
+            if (uri.Scheme != Uri.UriSchemeHttps)
+            {
+                failures.Add(
+                    $"{setting}:BaseUrl sends prompts over plain HTTP to a remote host ('{baseUrl}'). " +
+                    "Front the backend with TLS and use https://.");
+            }
+
+            if (string.IsNullOrWhiteSpace(secretName))
+            {
+                failures.Add(
+                    $"{setting}:ApiKeySecretName is empty for the remote backend '{uri.Host}'. The backend " +
+                    "must require a credential, or anything that can reach it bypasses the gateway; name " +
+                    "the secret that holds it.");
+            }
+            else if (IsPlaceholder(secretName))
+            {
+                failures.Add($"{setting}:ApiKeySecretName still contains a placeholder ('{secretName}').");
+            }
         }
     }
 

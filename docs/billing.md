@@ -79,6 +79,21 @@ shared topbar is hidden on this tab.
 efficiency, cost per 1K tokens, tokens per request, largest consumer; cost per request, cost
 per app, output share of cost, and cloud share.
 
+**Token usage** — activity rather than spend, with its own All / 30d / 7d switch (All means
+`UsageHistoryDays`, default 365) and two views:
+
+- *Overview* — sessions, requests, total tokens, active days, current and longest streak,
+  peak hour and favorite model, over a day-by-day heatmap (Monday-first weeks, four levels
+  from quartiles of active days so one huge day does not flatten the rest).
+- *Models* — tokens per day stacked by model, with a legend of input / output tokens and
+  share per model. Seven models are named; the tail folds into *Other*.
+
+Definitions, all over UTC days: a **session** is one STS token (`tokenId`); key-authenticated
+calls have no session of their own, so each caller's activity on one day counts as one. An
+**active day** has at least one request, failed ones included. The **current streak** ends
+today, so it reads 0 until the first request of the UTC day. **Peak hour** is shown in UTC.
+The **favorite model** is the one with the most tokens.
+
 **Applications** — a filterable, sortable table: search, model, local/cloud, minimum spend
 and minimum efficiency, with CSV / JSON / Excel export. Each row shows the rate card (on a
 hover chip), tokens, cost, spend share, and a per-app sparkline.
@@ -97,10 +112,11 @@ is worse than an annotated one:
 | Endpoint | Purpose |
 | :--- | :--- |
 | `GET /api/billing/summary?range=24h\|7d\|30d&grain=daily\|weekly\|monthly` | Account summary + per-application breakdown |
+| `GET /api/billing/usage?range=all\|30d\|7d` | Token activity: sessions, streaks, peak hour, daily and per-model tokens |
 | `GET /api/billing/applications/{appId}?grain=…` | One application, bucketed |
 | `GET /api/billing/export?format=csv\|json\|xlsx&range=…` | CSV, JSON, or a real `.xlsx` workbook |
 
-All three require `gateway:ReadBilling`. `from` and `to` override the default window.
+All four require `gateway:ReadBilling`. `from` and `to` override the default window.
 
 Every export writes an audit line of its own — exporting the whole account's spend is a
 privileged act worth recording.
@@ -135,7 +151,8 @@ Both were caught by checking the running page rather than the unit tests, and bo
     "DailyWindowDays": 30,
     "WeeklyWindowWeeks": 12,
     "MonthlyWindowMonths": 12,
-    "MonthlyBudget": 0.0                 // 0 = no budget bar
+    "MonthlyBudget": 0.0,                // 0 = no budget bar
+    "UsageHistoryDays": 365              // how far "All" reaches on the token usage panel
   }
 }
 ```
