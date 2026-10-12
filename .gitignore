@@ -500,3 +500,9 @@ data/dev/simulator/
 dev/aws-simulator/**/bin/
 dev/aws-simulator/**/obj/
 dev/aws-simulator/**/.keys/
+
+# The simulator's Data folders hold EF contexts and stores: source, not the runtime data/
+# directory ignored above. Windows matches that rule case-insensitively, so without these the
+# DbContexts never reach a clone and the simulator does not build.
+!dev/aws-simulator/src/*/Data/
+!dev/aws-simulator/src/*/Data/**
