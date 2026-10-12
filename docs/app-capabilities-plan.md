@@ -208,7 +208,9 @@ controls are the point, not the decoration.
 > - `POST /gateway/{appId}/tools/{tool}` on the data plane, gated by the new `tools:execute` scope, metered by the application quota, and audited with an argument hash rather than the arguments.
 > - Management API: `/api/mcp-servers` CRUD, `/api/mcp-servers/{id}/tools`, `/api/tools`, under `ManageMcpServers` and `ReadMcpServers`.
 >
-> **Deferred from A2:** the model-driven tool-calling loop (the adapter work to advertise tools to Bedrock and the local providers), stdio and container transports, first-party filesystem and SQL servers, `/mcp` as a server, and the dashboard pages for MCP. A2 is not finished until the tool-calling loop lands; until then tools are callable through the explicit endpoint only.
+> **The tool-calling loop now works.** `ModelRouter` offers the application's bound tools to the model, runs each call it asks for under the same bindings, quota and guardrails as a direct call, replays the result, and stops at `Gateway:Mcp:MaxToolSteps`. A refusal is handed back to the model as the tool's result rather than failing the request, so it can answer without the tool. Wire support: Bedrock/Anthropic (`tool_use` content blocks) and OpenAI-compatible servers such as LM Studio (`tools` / `tool_calls`). Namespaced `server.tool` names are encoded for providers that forbid dots and matched back against what was offered.
+>
+> **Deferred from A2:** Ollama's `/api/generate` has no tool support, so an Ollama-routed application is offered none — moving it to `/api/chat` is the remaining adapter. Also stdio and container transports, first-party filesystem and SQL servers, `/mcp` as a server, and the dashboard pages for MCP. The Bedrock payload shapes are covered by code review rather than tests, since `BedrockService` builds its own AWS client.
 >
 > Not done: the dashboard page for skills has not been click-tested in a browser, only its API. A3 onward is unstarted.
 

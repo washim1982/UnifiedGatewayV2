@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace UnifiedGateway.Models;
@@ -73,6 +74,11 @@ public class OpenAiChatRequest
 
     [JsonPropertyName("stream")]
     public bool Stream { get; set; } = false;
+
+    /// <summary>Tools offered for this turn. Omitted when the application has none.</summary>
+    [JsonPropertyName("tools")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<OpenAiTool>? Tools { get; set; }
 }
 
 public class OpenAiChatMessage
@@ -82,6 +88,59 @@ public class OpenAiChatMessage
 
     [JsonPropertyName("content")]
     public string Content { get; set; } = string.Empty;
+
+    /// <summary>Assistant turns that asked for tools, replayed as history.</summary>
+    [JsonPropertyName("tool_calls")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<OpenAiToolCall>? ToolCalls { get; set; }
+
+    /// <summary>Set on a "tool" message: which call this is the result of.</summary>
+    [JsonPropertyName("tool_call_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ToolCallId { get; set; }
+}
+
+public class OpenAiTool
+{
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "function";
+
+    [JsonPropertyName("function")]
+    public OpenAiFunction Function { get; set; } = new();
+}
+
+public class OpenAiFunction
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = string.Empty;
+
+    [JsonPropertyName("parameters")]
+    public JsonElement Parameters { get; set; }
+}
+
+public class OpenAiToolCall
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "function";
+
+    [JsonPropertyName("function")]
+    public OpenAiFunctionCall Function { get; set; } = new();
+}
+
+public class OpenAiFunctionCall
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Arguments as a JSON string, which is how OpenAI-compatible servers send them.</summary>
+    [JsonPropertyName("arguments")]
+    public string Arguments { get; set; } = "{}";
 }
 
 public class OpenAiChatResponse

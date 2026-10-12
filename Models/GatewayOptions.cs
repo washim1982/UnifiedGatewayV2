@@ -41,6 +41,13 @@ public class McpOptions
 
     /// <summary>Largest argument payload the gateway will send to a tool.</summary>
     public int MaxArgumentBytes { get; set; } = 32_768;
+
+    /// <summary>
+    /// How many rounds of model-asks-for-a-tool the gateway will run for one request. A model
+    /// that is still asking after this many is stopped and told so, rather than looping on the
+    /// application's budget.
+    /// </summary>
+    public int MaxToolSteps { get; set; } = 4;
 }
 
 /// <summary>

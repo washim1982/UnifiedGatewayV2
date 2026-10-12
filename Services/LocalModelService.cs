@@ -178,20 +178,14 @@ public class LocalModelService : ILocalModelService
         var client = _httpClientFactory.CreateClient("LmStudioClient");
         var cleanModel = request.Model.Replace("lmstudio/", "", StringComparison.OrdinalIgnoreCase);
 
-        var messages = new List<OpenAiChatMessage>();
-        if (!string.IsNullOrWhiteSpace(request.System))
-        {
-            messages.Add(new OpenAiChatMessage { Role = "system", Content = request.System });
-        }
-        messages.Add(new OpenAiChatMessage { Role = "user", Content = request.Input });
-
         var payload = new OpenAiChatRequest
         {
             Model = cleanModel,
-            Messages = messages,
+            Messages = BuildOpenAiMessages(request),
             Temperature = request.Temperature,
             MaxTokens = request.MaxTokens > 0 ? request.MaxTokens : 2048,
-            Stream = false
+            Stream = false,
+            Tools = OpenAiTools(request.Tools)
         };
 
         var httpResponse = await client.PostAsJsonAsync("/v1/chat/completions", payload, JsonOpts, ct);
@@ -200,9 +194,19 @@ public class LocalModelService : ILocalModelService
         var chatResult = await httpResponse.Content.ReadFromJsonAsync<OpenAiChatResponse>(JsonOpts, ct);
         stopwatch.Stop();
 
-        var outputText = chatResult?.Choices?.FirstOrDefault()?.Message?.Content ?? string.Empty;
+        var choice = chatResult?.Choices?.FirstOrDefault();
+        var outputText = choice?.Message?.Content ?? string.Empty;
         var inputTokens = chatResult?.Usage?.PromptTokens ?? (request.Input.Length / 4);
         var outputTokens = chatResult?.Usage?.CompletionTokens ?? (outputText.Length / 4);
+
+        var calls = (choice?.Message?.ToolCalls ?? [])
+            .Select(call => new ToolInvocation
+            {
+                Id = string.IsNullOrWhiteSpace(call.Id) ? Guid.NewGuid().ToString("N") : call.Id,
+                Name = ResolveToolName(call.Function.Name, request.Tools),
+                Arguments = string.IsNullOrWhiteSpace(call.Function.Arguments) ? "{}" : call.Function.Arguments
+            })
+            .ToList();
 
         return new UniversalResponse
         {
@@ -210,6 +214,8 @@ public class LocalModelService : ILocalModelService
             Model = cleanModel,
             Provider = "local",
             LatencyMs = stopwatch.ElapsedMilliseconds,
+            StopReason = choice?.FinishReason,
+            ToolCalls = calls,
             Tokens = new TokenUsage
             {
                 Input = inputTokens,
@@ -218,6 +224,90 @@ public class LocalModelService : ILocalModelService
             AppId = request.Metadata?.AppId,
             SessionId = request.Metadata?.SessionId
         };
+    }
+
+    /// <summary>
+    /// OpenAI-compatible servers expect [a-zA-Z0-9_-] in a function name, while gateway tools are
+    /// namespaced <c>server.tool</c>. The dot is encoded on the way out and matched against the
+    /// offered list on the way back.
+    /// </summary>
+    private static string WireToolName(string toolName) => toolName.Replace(".", "__");
+
+    private static string ResolveToolName(string wireName, List<ToolSpec>? offered) =>
+        offered?.FirstOrDefault(t => WireToolName(t.Name) == wireName)?.Name ?? wireName.Replace("__", ".");
+
+    private static List<OpenAiTool>? OpenAiTools(List<ToolSpec>? tools) =>
+        tools is not { Count: > 0 }
+            ? null
+            : tools.Select(t => new OpenAiTool
+            {
+                Function = new OpenAiFunction
+                {
+                    Name = WireToolName(t.Name),
+                    Description = t.Description,
+                    Parameters = ParseSchema(t.InputSchema)
+                }
+            }).ToList();
+
+    private static JsonElement ParseSchema(string schema)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(schema) ? "{}" : schema);
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            using var fallback = JsonDocument.Parse("""{"type":"object"}""");
+            return fallback.RootElement.Clone();
+        }
+    }
+
+    /// <summary>
+    /// The conversation so far: system, the caller's input, then one assistant turn per completed
+    /// tool round with a tool message per result. The gateway owns this history, so a refused
+    /// round is still represented honestly to the model.
+    /// </summary>
+    private static List<OpenAiChatMessage> BuildOpenAiMessages(UniversalRequest request)
+    {
+        var messages = new List<OpenAiChatMessage>();
+
+        if (!string.IsNullOrWhiteSpace(request.System))
+        {
+            messages.Add(new OpenAiChatMessage { Role = "system", Content = request.System });
+        }
+
+        messages.Add(new OpenAiChatMessage { Role = "user", Content = request.Input });
+
+        foreach (var turn in request.ToolTurns ?? [])
+        {
+            messages.Add(new OpenAiChatMessage
+            {
+                Role = "assistant",
+                Content = turn.AssistantText,
+                ToolCalls = turn.Calls.Select(call => new OpenAiToolCall
+                {
+                    Id = call.Id,
+                    Function = new OpenAiFunctionCall
+                    {
+                        Name = WireToolName(call.Name),
+                        Arguments = call.Arguments
+                    }
+                }).ToList()
+            });
+
+            foreach (var result in turn.Results)
+            {
+                messages.Add(new OpenAiChatMessage
+                {
+                    Role = "tool",
+                    ToolCallId = result.Id,
+                    Content = result.Result
+                });
+            }
+        }
+
+        return messages;
     }
 
     private async Task<UniversalResponse> InvokeLlamaCppAsync(

@@ -36,6 +36,18 @@ public record UniversalResponse
 
     [JsonPropertyName("error")]
     public GatewayError? Error { get; init; }
+
+    /// <summary>Tools the model asked to call. Empty when it answered instead.</summary>
+    [JsonPropertyName("tool_calls")]
+    public List<ToolInvocation> ToolCalls { get; init; } = [];
+
+    /// <summary>Provider stop reason, where one is reported ("tool_use", "end_turn", ...).</summary>
+    [JsonPropertyName("stop_reason")]
+    public string? StopReason { get; init; }
+
+    /// <summary>How many tool rounds the gateway ran before this answer.</summary>
+    [JsonPropertyName("tool_steps")]
+    public int ToolSteps { get; init; }
 }
 
 public record TokenUsage

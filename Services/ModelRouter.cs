@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
+using UnifiedGateway.Services.Mcp;
 
 namespace UnifiedGateway.Services;
 
@@ -11,6 +13,8 @@ public class ModelRouter : IModelRouter
     private readonly IApplicationRegistryService _registryService;
     private readonly IGuardrailService _guardrailService;
     private readonly ICapabilityService? _capabilityService;
+    private readonly IToolCatalog? _toolCatalog;
+    private readonly ICallerQuota? _quota;
     private readonly GatewayOptions _options;
     private readonly ILogger<ModelRouter> _logger;
 
@@ -25,8 +29,12 @@ public class ModelRouter : IModelRouter
         IGuardrailService guardrailService,
         IOptions<GatewayOptions> options,
         ILogger<ModelRouter> logger,
-        ICapabilityService? capabilityService = null)
+        ICapabilityService? capabilityService = null,
+        IToolCatalog? toolCatalog = null,
+        ICallerQuota? quota = null)
     {
+        _toolCatalog = toolCatalog;
+        _quota = quota;
         _bedrockService = bedrockService;
         _localModelService = localModelService;
         _registryService = registryService;
@@ -93,7 +101,8 @@ public class ModelRouter : IModelRouter
         };
 
         return await RouteWithFallbackAsync(
-            universalReq, app.FallbackProvider, app.FallbackModel, caller, cancellationToken);
+            universalReq with { Tools = await ToolSpecsForAsync(app, cancellationToken) },
+            app.FallbackProvider, app.FallbackModel, caller, cancellationToken, app);
     }
 
     public async Task<UniversalResponse> RouteAsync(
@@ -109,7 +118,8 @@ public class ModelRouter : IModelRouter
         string? fallbackProvider,
         string? fallbackModel,
         CallerContext? caller,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AppConfig? app = null)
     {
         var overallStopwatch = Stopwatch.StartNew();
 
@@ -200,7 +210,7 @@ public class ModelRouter : IModelRouter
 
         try
         {
-            response = await DispatchToProviderAsync(primaryProvider, sanitizedReq, cancellationToken);
+            response = await DispatchWithToolsAsync(primaryProvider, sanitizedReq, app, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -257,7 +267,8 @@ public class ModelRouter : IModelRouter
 
             try
             {
-                var fallbackResponse = await DispatchToProviderAsync(targetFallbackProvider, fallbackReq, cancellationToken);
+                var fallbackResponse = await DispatchWithToolsAsync(
+                    targetFallbackProvider, fallbackReq, app, cancellationToken);
                 overallStopwatch.Stop();
 
                 if (fallbackResponse.Error == null)
@@ -302,6 +313,164 @@ public class ModelRouter : IModelRouter
         var failureRes = response with { LatencyMs = overallStopwatch.ElapsedMilliseconds };
         await RecordTelemetryAsync(sanitizedReq, failureRes, false, guardrailResult, caller);
         return failureRes;
+    }
+
+    /// <summary>
+    /// The tools this application may offer the model: its own bindings, resolved against the
+    /// catalogue and filtered by each binding's side-effect ceiling. A tool the application
+    /// cannot call is never described to the model, so it cannot ask for it.
+    /// </summary>
+    private async Task<List<ToolSpec>?> ToolSpecsForAsync(AppConfig app, CancellationToken cancellationToken)
+    {
+        if (_toolCatalog is null || app.Capabilities.Count == 0)
+        {
+            return null;
+        }
+
+        var specs = new List<ToolSpec>();
+
+        foreach (var binding in app.Capabilities.Where(b => b.Enabled))
+        {
+            try
+            {
+                var tools = binding.Kind switch
+                {
+                    CapabilityKind.Tool => await _toolCatalog.FindAsync(binding.Ref, cancellationToken) is { } tool
+                        ? [tool]
+                        : new List<ToolDescriptor>(),
+                    CapabilityKind.McpServer => await _toolCatalog.ListAsync(binding.Ref, false, cancellationToken),
+                    _ => []
+                };
+
+                specs.AddRange(tools
+                    .Where(t => t.SideEffect <= binding.MaxSideEffect)
+                    .Select(t => new ToolSpec
+                    {
+                        Name = t.Name,
+                        Description = t.Description,
+                        InputSchema = t.InputSchema
+                    }));
+            }
+            catch (Exception ex)
+            {
+                // An unreachable server costs the model that tool, not the whole request.
+                _logger.LogWarning(ex,
+                    "Could not resolve capability '{Ref}' for application '{AppId}'; it is not offered.",
+                    binding.Ref, app.AppId);
+            }
+        }
+
+        return specs.Count == 0 ? null : specs.DistinctBy(s => s.Name).ToList();
+    }
+
+    /// <summary>
+    /// Dispatch, plus the tool loop when the application has tools and the model asks for one.
+    ///
+    /// Each round is bounded and each call goes through the same governance as a direct tool
+    /// call: the binding has to permit it, the quota has to allow it, and the guardrails see the
+    /// result. A refusal is handed back to the model as the tool's result rather than failing the
+    /// request, so it can answer without the tool.
+    /// </summary>
+    private async Task<UniversalResponse> DispatchWithToolsAsync(
+        string provider, UniversalRequest request, AppConfig? app, CancellationToken cancellationToken)
+    {
+        var response = await DispatchToProviderAsync(provider, request, cancellationToken);
+
+        if (_toolCatalog is null || app is null || request.Tools is not { Count: > 0 })
+        {
+            return response;
+        }
+
+        var turns = new List<ToolTurn>(request.ToolTurns ?? []);
+        var maxSteps = Math.Clamp(_options.Mcp.MaxToolSteps, 1, 10);
+        var steps = 0;
+
+        while (response.Error is null && response.ToolCalls.Count > 0 && steps < maxSteps)
+        {
+            steps++;
+
+            var turn = new ToolTurn { Calls = response.ToolCalls, AssistantText = response.Output };
+            foreach (var call in response.ToolCalls)
+            {
+                turn.Results.Add(await RunToolAsync(app, call, cancellationToken));
+            }
+
+            turns.Add(turn);
+
+            _logger.LogInformation(
+                "Tool round {Step} for application '{AppId}': {Tools}.",
+                steps, app.AppId, string.Join(", ", turn.Calls.Select(c => c.Name)));
+
+            response = await DispatchToProviderAsync(
+                provider, request with { ToolTurns = turns }, cancellationToken);
+        }
+
+        if (response.ToolCalls.Count > 0 && steps >= maxSteps)
+        {
+            _logger.LogWarning(
+                "Application '{AppId}' hit the {Max}-round tool limit and was stopped.", app.AppId, maxSteps);
+
+            return response with
+            {
+                ToolSteps = steps,
+                Error = new GatewayError
+                {
+                    Code = "TOOL_LOOP_EXHAUSTED",
+                    Message = $"The model was still requesting tools after {maxSteps} rounds.",
+                    Details = "Raise Gateway:Mcp:MaxToolSteps if this workload genuinely needs more."
+                }
+            };
+        }
+
+        return response with { ToolSteps = steps };
+    }
+
+    /// <summary>Runs one tool call and turns every outcome, including a refusal, into a result.</summary>
+    private async Task<ToolExchange> RunToolAsync(AppConfig app, ToolInvocation call, CancellationToken cancellationToken)
+    {
+        if (_quota is not null && !_quota.TryAcquireInvocation(app.AppId))
+        {
+            return new ToolExchange
+            {
+                Id = call.Id,
+                Name = call.Name,
+                Result = "Refused: this application has spent its request quota for the current window.",
+                IsError = true
+            };
+        }
+
+        try
+        {
+            var arguments = string.IsNullOrWhiteSpace(call.Arguments) ? "{}" : call.Arguments;
+            using var document = JsonDocument.Parse(arguments);
+
+            var result = await _toolCatalog!.ExecuteAsync(app, call.Name, document.RootElement, cancellationToken);
+
+            return new ToolExchange
+            {
+                Id = call.Id,
+                Name = call.Name,
+                Result = result.Output,
+                IsError = result.IsError
+            };
+        }
+        catch (ToolRefusedException ex)
+        {
+            _logger.LogWarning(
+                "Tool '{Tool}' refused for application '{AppId}': {Reason}", call.Name, app.AppId, ex.Message);
+
+            return new ToolExchange { Id = call.Id, Name = call.Name, Result = $"Refused: {ex.Message}", IsError = true };
+        }
+        catch (JsonException)
+        {
+            return new ToolExchange
+            {
+                Id = call.Id,
+                Name = call.Name,
+                Result = "Refused: the arguments were not valid JSON.",
+                IsError = true
+            };
+        }
     }
 
     private async Task<UniversalResponse> DispatchToProviderAsync(

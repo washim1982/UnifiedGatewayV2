@@ -27,6 +27,17 @@ public record UniversalRequest
 
     [JsonPropertyName("metadata")]
     public RequestMetadata? Metadata { get; init; }
+
+    /// <summary>
+    /// Tools the model may call on this request. Set by the router from the application's
+    /// bindings; a caller cannot put tools here, because asking does not grant.
+    /// </summary>
+    [JsonPropertyName("tools")]
+    public List<ToolSpec>? Tools { get; init; }
+
+    /// <summary>Completed rounds of the tool loop, replayed to the provider as message history.</summary>
+    [JsonPropertyName("toolTurns")]
+    public List<ToolTurn>? ToolTurns { get; init; }
 }
 
 public record RequestMetadata

@@ -133,7 +133,7 @@ public class BedrockService : IBedrockService
             using var reader = new StreamReader(response.Body);
             var responseString = await reader.ReadToEndAsync(cancellationToken);
 
-            var result = ParseResponseBody(modelId, responseString, stopwatch.ElapsedMilliseconds);
+            var result = ParseResponseBody(modelId, responseString, stopwatch.ElapsedMilliseconds, request.Tools);
             return result with
             {
                 AppId = request.Metadata?.AppId,
@@ -242,10 +242,8 @@ public class BedrockService : IBedrockService
                 MaxTokens = req.MaxTokens > 0 ? req.MaxTokens : 2048,
                 Temperature = req.Temperature,
                 System = string.IsNullOrWhiteSpace(req.System) ? null : req.System,
-                Messages =
-                [
-                    new ClaudeMessage { Role = "user", Content = req.Input }
-                ]
+                Messages = BuildClaudeMessages(req),
+                Tools = ClaudeTools(req.Tools)
             };
             return (JsonSerializer.SerializeToUtf8Bytes(claudeReq, JsonOpts), "application/json");
         }
@@ -313,20 +311,127 @@ public class BedrockService : IBedrockService
         return (JsonSerializer.SerializeToUtf8Bytes(defaultReq, JsonOpts), "application/json");
     }
 
-    private static UniversalResponse ParseResponseBody(string modelId, string json, long latencyMs)
+    /// <summary>
+    /// Anthropic accepts [a-zA-Z0-9_-] in a tool name, while gateway tools are namespaced
+    /// <c>server.tool</c>. The dot is encoded on the way out; on the way back the name is matched
+    /// against the tools that were actually offered, so nothing has to be guessed in reverse.
+    /// </summary>
+    private static string WireToolName(string toolName) => toolName.Replace(".", "__");
+
+    private static List<ClaudeTool>? ClaudeTools(List<ToolSpec>? tools)
+    {
+        if (tools is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        return tools.Select(t => new ClaudeTool
+        {
+            Name = WireToolName(t.Name),
+            Description = t.Description,
+            InputSchema = ParseSchema(t.InputSchema)
+        }).ToList();
+    }
+
+    private static JsonElement ParseSchema(string schema)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(schema) ? "{}" : schema);
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            // A server that publishes an unparseable schema still gets its tool offered, with an
+            // empty one, rather than taking the whole request down.
+            using var fallback = JsonDocument.Parse("""{"type":"object"}""");
+            return fallback.RootElement.Clone();
+        }
+    }
+
+    /// <summary>
+    /// The conversation so far: the caller's input, then one assistant turn per completed tool
+    /// round and the results the gateway produced for it. The gateway holds this history rather
+    /// than the provider, so a round can be refused or dropped without the provider disagreeing.
+    /// </summary>
+    private static List<ClaudeMessage> BuildClaudeMessages(UniversalRequest req)
+    {
+        var messages = new List<ClaudeMessage>
+        {
+            new() { Role = "user", Content = req.Input }
+        };
+
+        foreach (var turn in req.ToolTurns ?? [])
+        {
+            var assistant = new List<object>();
+            if (!string.IsNullOrWhiteSpace(turn.AssistantText))
+            {
+                assistant.Add(new { type = "text", text = turn.AssistantText });
+            }
+
+            foreach (var call in turn.Calls)
+            {
+                assistant.Add(new
+                {
+                    type = "tool_use",
+                    id = call.Id,
+                    name = WireToolName(call.Name),
+                    input = ParseSchema(call.Arguments)
+                });
+            }
+
+            messages.Add(new ClaudeMessage { Role = "assistant", Content = assistant });
+
+            messages.Add(new ClaudeMessage
+            {
+                Role = "user",
+                Content = turn.Results.Select(r => new
+                {
+                    type = "tool_result",
+                    tool_use_id = r.Id,
+                    content = r.Result,
+                    is_error = r.IsError
+                }).Cast<object>().ToList()
+            });
+        }
+
+        return messages;
+    }
+
+    private static UniversalResponse ParseResponseBody(
+        string modelId, string json, long latencyMs, List<ToolSpec>? offered = null)
     {
         var lower = modelId.ToLowerInvariant();
 
         if (lower.Contains("anthropic.claude"))
         {
             var claudeRes = JsonSerializer.Deserialize<ClaudeBedrockResponse>(json, JsonOpts);
-            var text = claudeRes?.Content?.FirstOrDefault()?.Text ?? string.Empty;
+            var blocks = claudeRes?.Content ?? [];
+
+            var text = string.Join("\n", blocks
+                .Where(b => b.Type == "text" && !string.IsNullOrEmpty(b.Text))
+                .Select(b => b.Text));
+
+            var calls = blocks
+                .Where(b => b.Type == "tool_use" && b.Name is not null)
+                .Select(b => new ToolInvocation
+                {
+                    Id = b.Id ?? Guid.NewGuid().ToString("N"),
+                    // Match the wire name against what was offered; an unoffered name is kept as
+                    // it came, and the tool plane then refuses it by binding.
+                    Name = offered?.FirstOrDefault(t => WireToolName(t.Name) == b.Name)?.Name ?? b.Name!,
+                    Arguments = b.Input?.GetRawText() ?? "{}"
+                })
+                .ToList();
+
             return new UniversalResponse
             {
                 Output = text,
                 Model = modelId,
                 Provider = "bedrock",
                 LatencyMs = latencyMs,
+                StopReason = claudeRes?.StopReason,
+                ToolCalls = calls,
                 Tokens = new GatewayTokenUsage
                 {
                     Input = claudeRes?.Usage?.InputTokens ?? ApproximateTokens(json.Length / 4),
