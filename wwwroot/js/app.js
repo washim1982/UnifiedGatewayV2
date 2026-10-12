@@ -251,6 +251,9 @@ document.addEventListener('DOMContentLoaded', () => {
         loadUsage();
       } else if (tab === 'guardrails') {
         loadGuardrailConfig();
+      } else if (tab === 'skills') {
+        loadSkills();
+        loadCapabilityApps();
       }
     });
   });
@@ -263,6 +266,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const titles = {
       apps: { title: 'Application Registry', sub: 'Manage per-application AI routing endpoints and system prompts' },
+      skills: { title: 'Skills & Capabilities', sub: 'Instruction sets an application can be given, and what is attached to each one' },
       guardrails: { title: 'Guardrails & Data Safety', sub: 'Admin-level PCI, PII, Secrets, and Prompt Injection policies for all requests' },
       generator: { title: 'API Generator & Test Console', sub: 'Generated REST endpoints with sample SDK code and interactive sandbox' },
       universal: { title: 'Universal Router', sub: 'Direct normalized schema invocation across Bedrock and Local engines' },
@@ -442,6 +446,206 @@ document.addEventListener('DOMContentLoaded', () => {
       btnRunGrTest.textContent = 'Analyze & Sanitize';
     }
   });
+
+  // --- Skills & capabilities ---------------------------------------------------
+  // The catalogue is separate from the bindings: a skill is registered once and attached to as
+  // many applications as want it, each pinning the version in force when it was attached.
+  let allSkills = [];
+
+  async function loadSkills() {
+    const list = document.getElementById('skills-list');
+    try {
+      const res = await apiFetch('/api/skills');
+      if (!res.ok) {
+        list.innerHTML = '<p class="placeholder-text">Skills could not be loaded. Your role may not permit it.</p>';
+        return;
+      }
+      allSkills = await res.json();
+      renderSkills();
+      renderSkillOptions();
+    } catch (err) {
+      list.innerHTML = '<p class="placeholder-text">Skills could not be loaded.</p>';
+    }
+  }
+
+  function renderSkills() {
+    const list = document.getElementById('skills-list');
+    if (!allSkills.length) {
+      list.innerHTML = '<p class="placeholder-text">No skills registered yet.</p>';
+      return;
+    }
+
+    list.innerHTML = allSkills.map(s => `
+      <div class="app-meta-row">
+        <div>
+          <strong>${escapeHtml(s.name)}</strong>
+          <span class="app-id-badge">${escapeHtml(s.skillId)}</span>
+          <span class="badge">v${s.version}</span>
+          ${s.isActive ? '' : '<span class="badge">disabled</span>'}
+          <div class="app-desc">${escapeHtml(s.description)}</div>
+        </div>
+        <div class="app-card-actions">
+          <button class="btn btn-sm btn-outline" data-skill-toggle="${escapeHtml(s.skillId)}" data-active="${s.isActive}">
+            ${s.isActive ? 'Disable' : 'Enable'}
+          </button>
+          <button class="btn btn-sm btn-danger" data-skill-delete="${escapeHtml(s.skillId)}">Delete</button>
+        </div>
+      </div>`).join('');
+
+    list.querySelectorAll('[data-skill-toggle]').forEach(btn =>
+      btn.addEventListener('click', () => toggleSkill(btn.dataset.skillToggle, btn.dataset.active !== 'true')));
+
+    list.querySelectorAll('[data-skill-delete]').forEach(btn =>
+      btn.addEventListener('click', () => deleteSkill(btn.dataset.skillDelete)));
+  }
+
+  function renderSkillOptions() {
+    const select = document.getElementById('cap-skill-select');
+    const active = allSkills.filter(s => s.isActive);
+    select.innerHTML = active.length
+      ? active.map(s => `<option value="${escapeHtml(s.skillId)}">${escapeHtml(s.name)} (v${s.version})</option>`).join('')
+      : '<option value="">No active skills</option>';
+  }
+
+  function loadCapabilityApps() {
+    const select = document.getElementById('cap-app-select');
+    const current = select.value;
+    select.innerHTML = allApps
+      .map(a => `<option value="${escapeHtml(a.appId)}">${escapeHtml(a.name)} (${escapeHtml(a.appId)})</option>`)
+      .join('');
+
+    if (current) select.value = current;
+    if (select.value) loadAppCapabilities(select.value);
+  }
+
+  async function loadAppCapabilities(appId) {
+    const list = document.getElementById('cap-list');
+    if (!appId) {
+      list.innerHTML = '<p class="placeholder-text">Choose an application.</p>';
+      return;
+    }
+
+    try {
+      const res = await apiFetch(`/api/apps/${encodeURIComponent(appId)}/capabilities`);
+      if (!res.ok) {
+        list.innerHTML = '<p class="placeholder-text">Capabilities could not be loaded.</p>';
+        return;
+      }
+
+      const views = await res.json();
+      if (!views.length) {
+        list.innerHTML = '<p class="placeholder-text">Nothing attached to this application.</p>';
+        return;
+      }
+
+      list.innerHTML = views.map(v => `
+        <div class="app-meta-row">
+          <div>
+            <strong>${escapeHtml(v.name || v.binding.ref)}</strong>
+            <span class="app-id-badge">${escapeHtml(v.binding.kind)}</span>
+            <span class="badge">pinned v${v.binding.version}</span>
+            ${v.catalogVersion > v.binding.version ? `<span class="badge">catalogue v${v.catalogVersion}</span>` : ''}
+            <div class="app-desc">${escapeHtml(v.usable ? (v.description || '') : (v.reason || 'Not usable.'))}</div>
+          </div>
+          <div class="app-card-actions">
+            <button class="btn btn-sm btn-danger" data-detach="${escapeHtml(v.binding.id)}">Detach</button>
+          </div>
+        </div>`).join('');
+
+      list.querySelectorAll('[data-detach]').forEach(btn =>
+        btn.addEventListener('click', () => detachCapability(appId, btn.dataset.detach)));
+    } catch (err) {
+      list.innerHTML = '<p class="placeholder-text">Capabilities could not be loaded.</p>';
+    }
+  }
+
+  async function createSkill(event) {
+    event.preventDefault();
+
+    const res = await apiFetch('/api/skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        skillId: document.getElementById('skill-id').value.trim(),
+        name: document.getElementById('skill-name').value.trim(),
+        description: document.getElementById('skill-description').value.trim(),
+        body: document.getElementById('skill-body').value
+      })
+    });
+
+    if (res.ok) {
+      document.getElementById('skill-form').reset();
+      await loadSkills();
+      return;
+    }
+
+    // The guardrails refuse a body that would carry an injection or a secret into a system
+    // prompt. Say which, rather than failing silently.
+    const problem = await res.json().catch(() => ({}));
+    alert(problem.error || 'The skill was refused.');
+  }
+
+  async function toggleSkill(skillId, isActive) {
+    const res = await apiFetch(`/api/skills/${encodeURIComponent(skillId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isActive })
+    });
+
+    if (!res.ok) {
+      alert('The skill could not be updated.');
+      return;
+    }
+    await loadSkills();
+  }
+
+  async function deleteSkill(skillId) {
+    if (!confirm(`Delete skill "${skillId}"? Applications that pinned it keep a binding that resolves to nothing.`)) {
+      return;
+    }
+
+    const res = await apiFetch(`/api/skills/${encodeURIComponent(skillId)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      alert('The skill could not be deleted.');
+      return;
+    }
+    await loadSkills();
+  }
+
+  async function attachCapability() {
+    const appId = document.getElementById('cap-app-select').value;
+    const skillId = document.getElementById('cap-skill-select').value;
+    if (!appId || !skillId) return;
+
+    const res = await apiFetch(`/api/apps/${encodeURIComponent(appId)}/capabilities`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'Skill', ref: skillId })
+    });
+
+    if (!res.ok) {
+      const problem = await res.json().catch(() => ({}));
+      alert(problem.error || 'The capability could not be attached.');
+      return;
+    }
+    await loadAppCapabilities(appId);
+  }
+
+  async function detachCapability(appId, bindingId) {
+    const res = await apiFetch(`/api/apps/${encodeURIComponent(appId)}/capabilities/${encodeURIComponent(bindingId)}`, {
+      method: 'DELETE'
+    });
+
+    if (!res.ok) {
+      alert('The capability could not be detached.');
+      return;
+    }
+    await loadAppCapabilities(appId);
+  }
+
+  document.getElementById('skill-form').addEventListener('submit', createSkill);
+  document.getElementById('btn-attach-capability').addEventListener('click', attachCapability);
+  document.getElementById('cap-app-select').addEventListener('change', e => loadAppCapabilities(e.target.value));
 
   // Fetch Models
   async function loadModels() {

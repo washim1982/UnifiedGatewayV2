@@ -11,7 +11,7 @@ public static class DashboardEndpoints
     /// <summary>
     /// Builds an audit record for a privileged action from the authenticated caller.
     /// </summary>
-    private static ManagementAuditEntry Audit(
+    internal static ManagementAuditEntry Audit(
         HttpContext ctx, string action, string? resource, bool success, string? detail = null) => new()
         {
             Action = action,
@@ -191,12 +191,20 @@ public static class DashboardEndpoints
             [FromQuery] string? scope,
             HttpContext ctx,
             IApplicationRegistryService registry,
+            ICallerQuota quota,
             CancellationToken ct) =>
         {
             var app = await registry.GetAppAsync(appId, ct);
             if (app == null)
             {
                 return Results.NotFound(new { error = "Application not found" });
+            }
+
+            // Minting here spends the same issuance capacity as /gateway/sts/token, so it draws on
+            // the application's issuance quota rather than only the management limiter (SEC-03).
+            if (!quota.TryAcquireIssuance(appId))
+            {
+                return GatewayEndpoints.QuotaExceeded(ctx);
             }
 
             var callerId = ctx.User.FindFirst(GatewayAuth.PrincipalArnClaim)?.Value ?? "dashboard";
@@ -251,6 +259,7 @@ public static class DashboardEndpoints
             HttpContext ctx,
             IModelRouter router,
             IApplicationRegistryService registry,
+            ICallerQuota quota,
             CancellationToken ct) =>
         {
             // The dashboard tester runs as the signed-in operator, so the invocation is
@@ -263,6 +272,13 @@ public static class DashboardEndpoints
                 SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
                 TraceId = ctx.TraceIdentifier
             };
+
+            // This route spends the same model capacity as the public invoke path, so it draws on
+            // the same application quota rather than only the per-address management limit (SEC-03).
+            if (!quota.TryAcquireInvocation(appId))
+            {
+                return GatewayEndpoints.QuotaExceeded(ctx);
+            }
 
             var result = await router.RouteAppRequestAsync(appId, request, caller, ct);
             await registry.RecordManagementActionAsync(

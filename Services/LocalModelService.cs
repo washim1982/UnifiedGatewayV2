@@ -37,6 +37,20 @@ public class LocalModelService : ILocalModelService
         _logger.LogInformation("Invoking Local Model: {Model} for AppId: {AppId}",
             model, request.Metadata?.AppId ?? "direct");
 
+        // Enabled is a dispatch restriction, not merely a validation exemption: a disabled backend
+        // is never contacted, by invocation or by the discovery and probe paths below (SEC-14).
+        var backend = BackendFor(lowerModel);
+        if (!backend.Enabled)
+        {
+            stopwatch.Stop();
+            _logger.LogWarning(
+                "Refused invocation of '{Model}': the {Backend} backend is disabled in this environment.",
+                model, backend.Name);
+
+            return CreateErrorResponse(request, model, stopwatch.ElapsedMilliseconds, "LOCAL_BACKEND_DISABLED",
+                $"The {backend.Name} backend is disabled for this gateway.");
+        }
+
         try
         {
             // Determine the target local engine: LM Studio, llama.cpp, or Ollama
@@ -254,50 +268,48 @@ public class LocalModelService : ILocalModelService
         };
     }
 
+    /// <summary>Which configured backend a model name routes to, and whether it may be called.</summary>
+    private (string Name, bool Enabled) BackendFor(string lowerModel)
+    {
+        if (lowerModel.StartsWith("lmstudio/") || lowerModel.StartsWith("openai/"))
+            return ("LmStudio", _options.LocalProviders.LmStudio.Enabled);
+
+        if (lowerModel.StartsWith("llamacpp/") || lowerModel.StartsWith("llama.cpp/"))
+            return ("LlamaCpp", _options.LocalProviders.LlamaCpp.Enabled);
+
+        return ("Ollama", _options.LocalProviders.Ollama.Enabled);
+    }
+
     public async Task<Dictionary<string, bool>> ProbeStatusAsync(CancellationToken cancellationToken = default)
     {
         var results = new Dictionary<string, bool>();
 
-        // Check Ollama
-        try
+        foreach (var (key, clientName, path, enabled) in new[]
         {
-            var ollama = _httpClientFactory.CreateClient("OllamaClient");
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(2));
-            var resp = await ollama.GetAsync("/api/tags", cts.Token);
-            results["ollama"] = resp.IsSuccessStatusCode;
-        }
-        catch
+            ("ollama", "OllamaClient", "/api/tags", _options.LocalProviders.Ollama.Enabled),
+            ("lmstudio", "LmStudioClient", "/v1/models", _options.LocalProviders.LmStudio.Enabled),
+            ("llamacpp", "LlamaCppClient", "/health", _options.LocalProviders.LlamaCpp.Enabled)
+        })
         {
-            results["ollama"] = false;
-        }
+            // A disabled backend is reported unavailable without being contacted (SEC-14).
+            if (!enabled)
+            {
+                results[key] = false;
+                continue;
+            }
 
-        // Check LM Studio
-        try
-        {
-            var lmStudio = _httpClientFactory.CreateClient("LmStudioClient");
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(2));
-            var resp = await lmStudio.GetAsync("/v1/models", cts.Token);
-            results["lmstudio"] = resp.IsSuccessStatusCode;
-        }
-        catch
-        {
-            results["lmstudio"] = false;
-        }
-
-        // Check LlamaCpp
-        try
-        {
-            var llamaCpp = _httpClientFactory.CreateClient("LlamaCppClient");
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(2));
-            var resp = await llamaCpp.GetAsync("/health", cts.Token);
-            results["llamacpp"] = resp.IsSuccessStatusCode;
-        }
-        catch
-        {
-            results["llamacpp"] = false;
+            try
+            {
+                var client = _httpClientFactory.CreateClient(clientName);
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromSeconds(2));
+                var resp = await client.GetAsync(path, cts.Token);
+                results[key] = resp.IsSuccessStatusCode;
+            }
+            catch
+            {
+                results[key] = false;
+            }
         }
 
         return results;
@@ -307,68 +319,79 @@ public class LocalModelService : ILocalModelService
     {
         var models = new List<string>();
 
-        // Query Ollama models
-        try
+        // Query Ollama models. A disabled backend is not contacted, even for discovery (SEC-14).
+        if (_options.LocalProviders.Ollama.Enabled)
         {
-            var ollama = _httpClientFactory.CreateClient("OllamaClient");
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(3));
-            var resp = await ollama.GetAsync("/api/tags", cts.Token);
-            if (resp.IsSuccessStatusCode)
+            try
             {
-                var content = await resp.Content.ReadAsStringAsync(cts.Token);
-                using var doc = JsonDocument.Parse(content);
-                if (doc.RootElement.TryGetProperty("models", out var modelsArr))
+                var ollama = _httpClientFactory.CreateClient("OllamaClient");
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromSeconds(3));
+                var resp = await ollama.GetAsync("/api/tags", cts.Token);
+                if (resp.IsSuccessStatusCode)
                 {
-                    foreach (var m in modelsArr.EnumerateArray())
+                    var content = await resp.Content.ReadAsStringAsync(cts.Token);
+                    using var doc = JsonDocument.Parse(content);
+                    if (doc.RootElement.TryGetProperty("models", out var modelsArr))
                     {
-                        if (m.TryGetProperty("name", out var nameProp))
+                        foreach (var m in modelsArr.EnumerateArray())
                         {
-                            var modelName = nameProp.GetString();
-                            if (!string.IsNullOrEmpty(modelName))
-                                models.Add($"ollama/{modelName}");
+                            if (m.TryGetProperty("name", out var nameProp))
+                            {
+                                var modelName = nameProp.GetString();
+                                if (!string.IsNullOrEmpty(modelName))
+                                    models.Add($"ollama/{modelName}");
+                            }
                         }
                     }
                 }
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Could not fetch models from Ollama");
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not fetch models from Ollama");
+            }
         }
 
         // Query LM Studio models
-        try
+        if (_options.LocalProviders.LmStudio.Enabled)
         {
-            var lmStudio = _httpClientFactory.CreateClient("LmStudioClient");
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(3));
-            var resp = await lmStudio.GetAsync("/v1/models", cts.Token);
-            if (resp.IsSuccessStatusCode)
+            try
             {
-                var content = await resp.Content.ReadAsStringAsync(cts.Token);
-                using var doc = JsonDocument.Parse(content);
-                if (doc.RootElement.TryGetProperty("data", out var dataArr))
+                var lmStudio = _httpClientFactory.CreateClient("LmStudioClient");
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromSeconds(3));
+                var resp = await lmStudio.GetAsync("/v1/models", cts.Token);
+                if (resp.IsSuccessStatusCode)
                 {
-                    foreach (var m in dataArr.EnumerateArray())
+                    var content = await resp.Content.ReadAsStringAsync(cts.Token);
+                    using var doc = JsonDocument.Parse(content);
+                    if (doc.RootElement.TryGetProperty("data", out var dataArr))
                     {
-                        if (m.TryGetProperty("id", out var idProp))
+                        foreach (var m in dataArr.EnumerateArray())
                         {
-                            var modelId = idProp.GetString();
-                            if (!string.IsNullOrEmpty(modelId))
-                                models.Add($"lmstudio/{modelId}");
+                            if (m.TryGetProperty("id", out var idProp))
+                            {
+                                var modelId = idProp.GetString();
+                                if (!string.IsNullOrEmpty(modelId))
+                                    models.Add($"lmstudio/{modelId}");
+                            }
                         }
                     }
                 }
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Could not fetch models from LM Studio");
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not fetch models from LM Studio");
+            }
         }
 
-        // Add common local defaults if list is empty
-        if (models.Count == 0)
+        // Defaults stand in for a backend that is up but answered nothing. With every local
+        // backend disabled the honest answer is an empty list, not a menu of uncallable models.
+        var anyEnabled = _options.LocalProviders.Ollama.Enabled
+                         || _options.LocalProviders.LmStudio.Enabled
+                         || _options.LocalProviders.LlamaCpp.Enabled;
+
+        if (models.Count == 0 && anyEnabled)
         {
             models.AddRange(["ollama/llama3", "ollama/mistral", "ollama/phi3", "lmstudio/local-model"]);
         }

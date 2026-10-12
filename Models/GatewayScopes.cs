@@ -18,11 +18,18 @@ public static class GatewayScopes
     /// <summary>Administrative operations, including the universal endpoint.</summary>
     public const string Admin = "admin";
 
+    /// <summary>
+    /// Call a tool the application has been given. Separate from <see cref="Invoke"/> on purpose:
+    /// a token minted to answer questions should not gain the ability to write through a tool
+    /// because the application was later attached to one.
+    /// </summary>
+    public const string ToolsExecute = "tools:execute";
+
     /// <summary>Grants everything. Only mintable by the master credential.</summary>
     public const string All = "*";
 
     public static readonly IReadOnlySet<string> Known =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Invoke, Read, Admin, All };
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Invoke, Read, Admin, ToolsExecute, All };
 
     /// <summary>
     /// Normalises a requested scope string. Unknown scopes are rejected rather than silently

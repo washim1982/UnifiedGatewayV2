@@ -1,6 +1,6 @@
 # Dev Environment — .NET AWS Simulator
 
-Development runs against [`DOTNET_AWS_SIMULATOR`](../../../workspace/Projects/DOTNET_AWS_SIMULATOR). Test and Production run against real AWS. The binary is identical; only `Gateway:Cloud` differs.
+Development runs against the .NET AWS simulator bundled in this repository at [`dev/aws-simulator`](../dev/aws-simulator) (originally [`DOTNET_AWS_SIMULATOR`](../../../workspace/Projects/DOTNET_AWS_SIMULATOR)). The gateway starts it, and stops it, with itself. Test and Production run against real AWS. The binary is identical; only `Gateway:Cloud` differs.
 
 | | |
 | :--- | :--- |
@@ -51,15 +51,25 @@ Your simulator already had the right idea — `IObjectStoreClient` / `IKmsClient
 ## 3. Running it
 
 ```bash
-# 1. Start the simulator (from DOTNET_AWS_SIMULATOR)
-./run-simulator.ps1
-
-# 2. Seed the gateway's IAM roles — see §4 for why this matters
-python deploy/dotnet-simulator/provision-dotnet-simulator.py
-
-# 3. Start the gateway
+# 1. Start the gateway. It builds and launches S3Local, KmsLocal and IamLocal itself.
 ASPNETCORE_ENVIRONMENT=Development dotnet run --no-launch-profile
+
+# 2. Once, after the first run creates IamLocal's database: seed the gateway's IAM roles
+#    — see §4 for why this matters. Then restart the gateway.
+python deploy/dotnet-simulator/provision-dotnet-simulator.py
 ```
+
+`Gateway:DevSimulator` controls this. The services run as child processes on the ports in
+`Gateway:Cloud:LocalDotNet` — the same settings the gateway's own clients read, so the two cannot
+disagree — and their state (SQLite databases, bucket objects, key material) lives under
+`data/dev/simulator`, which is git-ignored. They are attached to a Windows job object, so they go
+away even if the gateway is killed rather than stopped.
+
+A service already answering on its port is reused rather than duplicated, so running
+`dev/aws-simulator/run-simulator.ps1` by hand still works. Set `Gateway:DevSimulator:Enabled` to
+`false` to manage the simulator entirely yourself. Only a **Debug** build compiles it, and
+`StartupValidator` refuses the setting outside Development: the simulator grants every role it is
+asked for and must never travel with a production artefact.
 
 On start the gateway probes each URL and confirms it is the service it expects:
 
@@ -87,7 +97,7 @@ The gateway now checks service identity at startup (`/health` reports `{"service
 
 > `IamLocal is not answering at http://localhost:5003: expected 'IamLocal' but found 'kms-service'. The .NET simulator and the Docker simulator both use ports 5001-5003 with different services on each; stop one before starting the other, or give them distinct ports.`
 
-**Worth fixing properly**: move the .NET simulator to 5101–5103 in `run-simulator.ps1`, and the two can run side by side. The gateway needs only a config change to follow.
+**Fixed.** The bundled simulator now runs on **5101–5103** (S3Local 5101, KmsLocal 5102, IamLocal 5103), so the Docker stack can keep 5001–5003 and both run side by side. `Gateway:Cloud:LocalDotNet` and `Gateway:Aws:RolesAnywhere:EndpointOverride` point at the new ports, and `DevSimulatorTests` asserts that the ports the gateway launches are the ports it then calls — the mismatch this section describes cannot return silently.
 
 ### Every role was a full administrator
 

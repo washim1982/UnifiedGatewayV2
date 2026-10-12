@@ -10,6 +10,12 @@ public interface IApplicationRegistryService
     Task<AppConfig?> UpdateAppAsync(string appId, UpdateAppRequest request, CancellationToken cancellationToken = default);
     Task<bool> DeleteAppAsync(string appId, CancellationToken cancellationToken = default);
 
+    /// <summary>Attaches a resolved capability binding to an application.</summary>
+    Task<AppConfig?> AttachCapabilityAsync(string appId, CapabilityBinding binding, CancellationToken cancellationToken = default);
+
+    /// <summary>Removes one binding by its id. False when the application or binding is unknown.</summary>
+    Task<bool> DetachCapabilityAsync(string appId, string bindingId, CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Rotates an application's long-term API key. The previous key is invalidated immediately.
     /// Returns the new plaintext key exactly once, or null if the application does not exist.

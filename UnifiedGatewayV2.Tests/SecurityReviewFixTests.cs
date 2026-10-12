@@ -5,6 +5,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using UnifiedGateway.Endpoints;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
 using UnifiedGateway.Services.Cloud;
@@ -415,6 +416,8 @@ public class SecurityReviewFixTests
     [InlineData("http://ollama.onprem.local:11434", "", false)]
     public void SEC14_TlsWithACredentialALocalBackendOrADisabledOneIsAccepted(string baseUrl, string secretName, bool enabled)
     {
+        // A disabled backend passes validation only because it cannot be dispatched to at all:
+        // see SEC14_ADisabledBackendIsNeverInvoked and the handler and discovery tests below.
         Assert.Null(ValidateProductionWithOllama(baseUrl, secretName, enabled));
     }
 
@@ -441,11 +444,14 @@ public class SecurityReviewFixTests
     }
 
     private static async Task<(RecordingBackend Backend, Exception? Error)> SendToBackendAsync(
-        string url, string secretName, string? secret)
+        string url, string secretName, string? secret, bool enabled = true, bool enforceRemotePolicy = true)
     {
         var backend = new RecordingBackend();
         using var invoker = new HttpMessageInvoker(
-            new LocalBackendAuthHandler(new StubSecret(secret), secretName) { InnerHandler = backend });
+            new LocalBackendAuthHandler(new StubSecret(secret), "Ollama", enabled, secretName, enforceRemotePolicy)
+            {
+                InnerHandler = backend
+            });
 
         var error = await Record.ExceptionAsync(() =>
             invoker.SendAsync(new HttpRequestMessage(HttpMethod.Post, url), CancellationToken.None));
@@ -492,5 +498,106 @@ public class SecurityReviewFixTests
         Assert.Null(error);
         Assert.NotNull(backend.Received);
         Assert.Null(backend.Received!.Headers.Authorization);
+    }
+
+    // --- SEC-14 re-review: Enabled is a dispatch gate, not a validation exemption ------
+
+    private sealed class OneBackendFactory(HttpMessageHandler handler) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) =>
+            new(handler, disposeHandler: false) { BaseAddress = new Uri("http://ollama.onprem.local:11434") };
+    }
+
+    private static LocalModelService LocalModels(RecordingBackend backend, bool enabled)
+    {
+        var options = new GatewayOptions();
+        options.LocalProviders.Ollama.Enabled = enabled;
+        options.LocalProviders.LmStudio.Enabled = enabled;
+        options.LocalProviders.LlamaCpp.Enabled = enabled;
+
+        return new LocalModelService(
+            new OneBackendFactory(backend), Options.Create(options), NullLogger<LocalModelService>.Instance);
+    }
+
+    [Fact]
+    public async Task SEC14_ADisabledBackendIsNeverInvoked()
+    {
+        var backend = new RecordingBackend();
+
+        var response = await LocalModels(backend, enabled: false)
+            .InvokeLocalModelAsync(new UniversalRequest { Model = "ollama/llama3", Input = "hello" });
+
+        Assert.Equal("LOCAL_BACKEND_DISABLED", response.Error?.Code);
+        Assert.Null(backend.Received);
+    }
+
+    [Fact]
+    public async Task SEC14_DiscoveryAndProbesDoNotContactDisabledBackends()
+    {
+        var backend = new RecordingBackend();
+        var service = LocalModels(backend, enabled: false);
+
+        var models = await service.ListAvailableLocalModelsAsync();
+        var probes = await service.ProbeStatusAsync();
+
+        // No menu of uncallable models, and nothing reported reachable, without a single request.
+        Assert.Empty(models);
+        Assert.All(probes.Values, reachable => Assert.False(reachable));
+        Assert.Null(backend.Received);
+    }
+
+    [Fact]
+    public async Task SEC14_TheHandlerRefusesEveryRequestToADisabledBackend()
+    {
+        var (backend, error) = await SendToBackendAsync(
+            "http://localhost:11434/api/generate", "", secret: null, enabled: false);
+
+        Assert.IsType<HttpRequestException>(error);
+        Assert.Null(backend.Received);
+    }
+
+    [Fact]
+    public async Task SEC14_ARemoteBackendWithNoCredentialIsRefusedOutsideDevelopment()
+    {
+        var (backend, error) = await SendToBackendAsync(
+            "https://ollama.onprem.local/api/generate", "", secret: null);
+
+        Assert.IsType<HttpRequestException>(error);
+        Assert.Null(backend.Received);
+    }
+
+    [Fact]
+    public async Task SEC14_DevelopmentMayStillUseAPlainHttpBackendOnTheBench()
+    {
+        var (backend, error) = await SendToBackendAsync(
+            "http://ollama.lab.internal:11434/api/generate", "", secret: null, enforceRemotePolicy: false);
+
+        Assert.Null(error);
+        Assert.NotNull(backend.Received);
+    }
+
+    // --- SEC-03 re-review: the universal quota follows a server-derived principal ------
+
+    [Fact]
+    public void SEC03_TheUniversalQuotaIgnoresTheCallerChosenTokenLabel()
+    {
+        const string breakGlass = "arn:aws:iam::111122223333:role/GatewayBreakGlassRole";
+
+        // Two admin tokens for one principal, labelled differently when they were minted.
+        var firstLabel = CallerContext.ActorFor(
+            new AppStsTokenPayload { AppId = "*", IsAdmin = true, CallerId = "label-one" });
+        var secondLabel = CallerContext.ActorFor(
+            new AppStsTokenPayload { AppId = "*", IsAdmin = true, CallerId = "label-two" });
+
+        Assert.NotEqual(firstLabel, secondLabel);
+
+        var identity = GatewayEndpoints.UniversalQuotaIdentity(breakGlass);
+        Assert.DoesNotContain("label-one", identity);
+        Assert.DoesNotContain("label-two", identity);
+
+        // One request per window: relabelling a token cannot buy a second bucket.
+        using var quota = Quota(invokePerMinute: 1, issuancePerMinute: 10);
+        Assert.True(quota.TryAcquireInvocation(GatewayEndpoints.UniversalQuotaIdentity(breakGlass)));
+        Assert.False(quota.TryAcquireInvocation(GatewayEndpoints.UniversalQuotaIdentity(breakGlass)));
     }
 }

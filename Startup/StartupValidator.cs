@@ -126,6 +126,16 @@ public static partial class StartupValidator
                 "Enable it and grant access through the policy document.");
         }
 
+        // --- Bundled AWS simulator -----------------------------------------------
+        // The simulator admits a caller on a bare role name and grants every role asked for. It
+        // is a Development convenience and must never be started anywhere else.
+        if (gateway.DevSimulator?.Enabled == true && !isDevelopment)
+        {
+            failures.Add(
+                $"Gateway:DevSimulator:Enabled is true in the '{environment.EnvironmentName}' environment. " +
+                "The local AWS simulator grants every role it is asked for; it is for Development only.");
+        }
+
         // --- Native Bedrock guardrails -------------------------------------------
         // The switch is configurable, but no invocation passes a guardrail identifier to
         // Bedrock, so turning it on would promise provider-side filtering that never runs.

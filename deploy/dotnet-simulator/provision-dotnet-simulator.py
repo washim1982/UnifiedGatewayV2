@@ -11,8 +11,14 @@ Why it writes SQLite directly: IamLocal exposes no role-management endpoint, and
 dev would be a full administrator and role separation would never be exercised locally.
 Seeding real policies makes a dev denial behave the way a production denial will.
 
+The simulator now ships inside this repository at dev/aws-simulator, and the gateway starts it
+in Development (Gateway:DevSimulator), keeping its databases, buckets and keys under
+data/dev/simulator. Those are the defaults below. Start the gateway once so IamLocal creates
+its database, then run this.
+
 Usage:
     python deploy/dotnet-simulator/provision-dotnet-simulator.py
+    python deploy/dotnet-simulator/provision-dotnet-simulator.py --db C:/path/to/iam.db
     python deploy/dotnet-simulator/provision-dotnet-simulator.py --sim-root C:/path/to/DOTNET_AWS_SIMULATOR
 """
 
@@ -26,6 +32,14 @@ import urllib.request
 import uuid
 
 ACCOUNT = "123456789012"
+
+# The repository root, two directories above this script.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Where the bundled simulator keeps its state (Gateway:DevSimulator:DataDirectory).
+DEFAULT_DB = os.path.join(REPO_ROOT, "data", "dev", "simulator", "iam.db")
+
+# A separately cloned DOTNET_AWS_SIMULATOR, for anyone still running one.
 DEFAULT_SIM_ROOT = r"C:\Users\wasim\workspace\Projects\DOTNET_AWS_SIMULATOR"
 
 # Policies use the simulator's own lowercase property names so its dashboard renders them.
@@ -60,12 +74,21 @@ ROLES = [
                          "gateway:InvokeApplication", "gateway:ReadMetrics",
                          "gateway:ListModels", "gateway:TestGuardrails",
                          "gateway:ReadGuardrailConfig",
+                         # Capabilities: an application owner authors skills and attaches
+                         # catalogue entries to their own applications. Registering anything that
+                         # executes -- MCP servers, plugins -- stays with the platform admin.
+                         "gateway:ListCapabilities", "gateway:ManageSkills",
+                         "gateway:ManageAppCapabilities",
+                         # Read the MCP catalogue to choose tools to attach; registering a
+                         # server stays with the platform admin, since its tools execute.
+                         "gateway:ReadMcpServers",
                      ],
                      "resource": ["*"]},
                     {"sid": "DenyPolicyAndKeyControl", "effect": "Deny",
                      "action": [
                          "gateway:UpdateGuardrailConfig", "gateway:RotateSigningKey",
                          "gateway:DeleteApplication", "gateway:ReadBilling",
+                         "gateway:ManageMcpServers", "gateway:ManagePlugins",
                      ],
                      "resource": ["*"]},
                     {"sid": "SimulatorServices", "effect": "Allow",
@@ -85,6 +108,8 @@ ROLES = [
                      "action": [
                          "gateway:ListApplications", "gateway:GetApplication",
                          "gateway:InvokeApplication", "gateway:ListModels",
+                         # Read the catalogue, but neither author nor attach.
+                         "gateway:ListCapabilities",
                      ],
                      "resource": ["*"]},
                     {"sid": "DenyEverythingElse", "effect": "Deny",
@@ -95,6 +120,8 @@ ROLES = [
                          "gateway:UpdateGuardrailConfig", "gateway:ReadGuardrailConfig",
                          "gateway:TestGuardrails", "gateway:ReadMetrics",
                          "gateway:ReadCredentialStatus", "gateway:ReadBilling",
+                         "gateway:ManageSkills", "gateway:ManageAppCapabilities",
+                         "gateway:ManageMcpServers", "gateway:ManagePlugins",
                      ],
                      "resource": ["*"]},
                 ],
@@ -203,14 +230,22 @@ def verify(iam_url):
 
 def main():
     parser = argparse.ArgumentParser(description="Provision the .NET AWS simulator for the gateway.")
-    parser.add_argument("--sim-root", default=DEFAULT_SIM_ROOT)
-    parser.add_argument("--iam", default="http://localhost:5003")
+    parser.add_argument("--db", default=None,
+                        help="IamLocal's SQLite database (default: the bundled simulator's).")
+    parser.add_argument("--sim-root", default=None,
+                        help="A separately cloned DOTNET_AWS_SIMULATOR to provision instead.")
+    parser.add_argument("--iam", default="http://localhost:5103")
     args = parser.parse_args()
 
-    db_path = os.path.join(args.sim_root, "src", "IamLocal", "Data", "iam.db")
+    if args.db:
+        db_path = args.db
+    elif args.sim_root:
+        db_path = os.path.join(args.sim_root, "src", "IamLocal", "Data", "iam.db")
+    else:
+        db_path = DEFAULT_DB
 
     print("Provisioning the .NET local AWS simulator for the Unified LLM Gateway")
-    print(f"  simulator root: {args.sim_root}")
+    print(f"  IamLocal database: {db_path}")
 
     provision_roles(db_path)
     verify(args.iam)

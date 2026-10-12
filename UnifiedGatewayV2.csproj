@@ -29,6 +29,31 @@
     <None Remove="UnifiedGatewayV2.Tests\**" />
   </ItemGroup>
 
+  <!-- The local AWS simulator is a separate set of projects under dev\, not part of this
+       assembly. Without these removals the SDK's default globs would compile its sources into
+       the gateway and copy its appsettings.json over this project's own. -->
+  <ItemGroup>
+    <Compile Remove="dev\**" />
+    <Content Remove="dev\**" />
+    <EmbeddedResource Remove="dev\**" />
+    <None Remove="dev\**" />
+  </ItemGroup>
+
+  <!-- Development launches the simulator as child processes (LocalAwsSimulatorHost), so a Debug
+       build has to produce runnable binaries for it. A Release build never builds it: the
+       simulator admits any role with Allow */* and must not travel with a production artefact. -->
+  <Target Name="BuildLocalAwsSimulator" BeforeTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+    <!-- Shared goes first, on its own. All three services reference it, and building them in
+         parallel let one service compile against the previous Shared.dll while another was still
+         rewriting it - which shows up as a stale-overload error rather than as a build order bug. -->
+    <MSBuild Projects="dev\aws-simulator\src\Shared\Shared.csproj"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration)" />
+    <MSBuild Projects="dev\aws-simulator\src\S3Local\S3Local.csproj;dev\aws-simulator\src\KmsLocal\KmsLocal.csproj;dev\aws-simulator\src\IamLocal\IamLocal.csproj"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration)" />
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="AWSSDK.BedrockRuntime" Version="3.7.404.7" />
     <PackageReference Include="AWSSDK.KeyManagementService" Version="3.7.400.78" />

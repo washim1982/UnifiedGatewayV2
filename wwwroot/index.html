@@ -66,6 +66,10 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           Applications
         </button>
+        <button class="nav-btn" data-tab="skills">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          Skills & Capabilities
+        </button>
         <button class="nav-btn" data-tab="guardrails" data-requires-admin>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Guardrails & Safety
@@ -123,6 +127,80 @@
       <section class="tab-pane active" id="pane-apps">
         <div class="app-grid" id="apps-container">
           <!-- Dynamic App Cards rendered here -->
+        </div>
+      </section>
+
+      <!-- TAB: Skills & Capabilities -->
+      <section class="tab-pane" id="pane-skills">
+        <div class="generator-layout">
+          <div class="panel">
+            <div class="panel-head">
+              <span class="panel-title">Skill catalogue</span>
+            </div>
+            <p class="panel-note">
+              Instruction sets an application can be given. A skill is text the model reads: it grants
+              no tools and no other access. Every body is guardrail-checked before it is stored.
+            </p>
+            <div id="skills-list" class="factlist">
+              <p class="placeholder-text">Loading skills...</p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <span class="panel-title">Register a skill</span>
+            </div>
+            <form id="skill-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label>SKILL ID</label>
+                  <input class="form-control" id="skill-id" placeholder="refund-policy" required>
+                </div>
+                <div class="form-group">
+                  <label>NAME</label>
+                  <input class="form-control" id="skill-name" placeholder="Refund policy">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>DESCRIPTION</label>
+                <input class="form-control" id="skill-description"
+                       placeholder="One line. The model always sees this." required>
+              </div>
+              <div class="form-group">
+                <label>INSTRUCTIONS</label>
+                <textarea class="form-control" id="skill-body" rows="7"
+                          placeholder="Loaded into the prompt only when a request asks for this skill."></textarea>
+              </div>
+              <button type="submit" class="btn btn-primary" data-requires-admin>Register skill</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top: 18px;">
+          <div class="panel-head">
+            <span class="panel-title">Application capabilities</span>
+          </div>
+          <p class="panel-note">
+            Attaching pins the catalogue version in force today, so later edits to a skill do not change
+            what this application sends to a model until it is re-attached.
+          </p>
+          <div class="form-row">
+            <div class="form-group">
+              <label>APPLICATION</label>
+              <select id="cap-app-select" class="form-control"></select>
+            </div>
+            <div class="form-group">
+              <label>SKILL TO ATTACH</label>
+              <select id="cap-skill-select" class="form-control"></select>
+            </div>
+            <div class="form-group">
+              <label>&nbsp;</label>
+              <button class="btn btn-primary" id="btn-attach-capability" data-requires-admin>Attach</button>
+            </div>
+          </div>
+          <div id="cap-list" class="factlist">
+            <p class="placeholder-text">Choose an application.</p>
+          </div>
         </div>
       </section>
 

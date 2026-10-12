@@ -10,21 +10,28 @@ public class ModelRouter : IModelRouter
     private readonly ILocalModelService _localModelService;
     private readonly IApplicationRegistryService _registryService;
     private readonly IGuardrailService _guardrailService;
+    private readonly ICapabilityService? _capabilityService;
     private readonly GatewayOptions _options;
     private readonly ILogger<ModelRouter> _logger;
 
+    /// <param name="capabilityService">
+    /// Composes attached skills into the application's system prompt. Optional so a test can
+    /// exercise routing alone; when it is absent the prompt is the application's own, unchanged.
+    /// </param>
     public ModelRouter(
         IBedrockService bedrockService,
         ILocalModelService localModelService,
         IApplicationRegistryService registryService,
         IGuardrailService guardrailService,
         IOptions<GatewayOptions> options,
-        ILogger<ModelRouter> logger)
+        ILogger<ModelRouter> logger,
+        ICapabilityService? capabilityService = null)
     {
         _bedrockService = bedrockService;
         _localModelService = localModelService;
         _registryService = registryService;
         _guardrailService = guardrailService;
+        _capabilityService = capabilityService;
         _options = options.Value;
         _logger = logger;
     }
@@ -69,7 +76,11 @@ public class ModelRouter : IModelRouter
             Model = app.Model,
             Provider = app.Provider,
             Input = request.Input,
-            System = app.SystemPrompt,
+            // Attached skills are announced here, and the ones this request named are loaded in
+            // full. A skill the application does not have cannot be requested into existence.
+            System = _capabilityService is null
+                ? app.SystemPrompt
+                : await _capabilityService.ComposeSystemPromptAsync(app, request.Skills, cancellationToken),
             Temperature = request.Temperature ?? app.Temperature,
             MaxTokens = request.MaxTokens ?? app.MaxTokens,
             Metadata = new RequestMetadata

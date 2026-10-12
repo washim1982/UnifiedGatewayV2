@@ -323,6 +323,51 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         return removed;
     }
 
+    public async Task<AppConfig?> AttachCapabilityAsync(
+        string appId, CapabilityBinding binding, CancellationToken cancellationToken = default)
+    {
+        if (!_apps.TryGetValue(appId, out var existing))
+        {
+            return null;
+        }
+
+        var updated = existing with
+        {
+            Capabilities = [.. existing.Capabilities, binding],
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        _apps[appId] = updated;
+        await PersistRegistryToFileAsync();
+
+        _logger.LogInformation(
+            "Attached {Kind} '{Ref}' v{Version} to application '{AppId}'.",
+            binding.Kind, binding.Ref, binding.Version, appId);
+
+        return updated;
+    }
+
+    public async Task<bool> DetachCapabilityAsync(
+        string appId, string bindingId, CancellationToken cancellationToken = default)
+    {
+        if (!_apps.TryGetValue(appId, out var existing))
+        {
+            return false;
+        }
+
+        var remaining = existing.Capabilities.Where(c => c.Id != bindingId).ToList();
+        if (remaining.Count == existing.Capabilities.Count)
+        {
+            return false;
+        }
+
+        _apps[appId] = existing with { Capabilities = remaining, UpdatedAt = DateTimeOffset.UtcNow };
+        await PersistRegistryToFileAsync();
+
+        _logger.LogInformation("Detached capability {BindingId} from application '{AppId}'.", bindingId, appId);
+        return true;
+    }
+
     public async Task<string?> RotateApiKeyAsync(string appId, CancellationToken cancellationToken = default)
     {
         if (!_apps.TryGetValue(appId, out var existing))
@@ -402,7 +447,8 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
                 // label; the identity recorded is the app, or break-glass for an admin token.
                 Actor = CallerContext.ActorFor(payload),
                 AuthType = payload.IsAdmin ? "AdminStsToken" : "AppStsToken",
-                TokenId = payload.Jti
+                TokenId = payload.Jti,
+                Scope = payload.Scope
             });
         }
 
@@ -422,7 +468,8 @@ public partial class ApplicationRegistryService : IApplicationRegistryService
         {
             // The prefix identifies which key was used without recording the key itself.
             Actor = app.ApiKeyPrefix,
-            AuthType = "AppApiKey"
+            AuthType = "AppApiKey",
+            Scope = GatewayScopes.All
         });
     }
     public async Task<AppStsTokenResponse?> IssueStsTokenForAppAsync(

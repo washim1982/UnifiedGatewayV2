@@ -1,8 +1,12 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services;
 using UnifiedGateway.Services.Cloud;
+using UnifiedGateway.Services.Mcp;
 
 namespace UnifiedGateway.Endpoints;
 
@@ -164,6 +168,7 @@ public static class GatewayEndpoints
             [FromHeader(Name = "Authorization")] string? authHeader,
             HttpContext ctx,
             IOptions<GatewayOptions> options,
+            IOptions<CloudOptions> cloudOptions,
             ISecurityService securityService,
             IAdminCredentialService adminCredentials,
             IModelRouter router,
@@ -233,7 +238,8 @@ public static class GatewayEndpoints
                 }
             }
 
-            if (!quota.TryAcquireInvocation("universal:" + (caller?.Actor ?? "anonymous")))
+            if (!quota.TryAcquireInvocation(
+                    UniversalQuotaIdentity(cloudOptions.Value.AccessControl.BreakGlassPrincipalArn)))
             {
                 return QuotaExceeded(ctx);
             }
@@ -245,6 +251,77 @@ public static class GatewayEndpoints
         .WithSummary("Direct universal schema invocation with specified model and provider")
         .Produces<UniversalResponse>(StatusCodes.Status200OK)
         .Produces<UniversalResponse>(StatusCodes.Status401Unauthorized)
+        .RequireRateLimiting("per-app");
+
+        // Tool execution.
+        //
+        // Deliberately not folded into invoke: calling a tool is not answering a question, and a
+        // credential minted for one should not be able to do the other. The application must have
+        // the tool attached, the credential must carry tools:execute, and the result goes through
+        // the egress guardrails before the caller sees it.
+        group.MapPost("/{appId}/tools/{tool}", async (
+            string appId,
+            string tool,
+            [FromBody] JsonElement arguments,
+            [FromHeader(Name = "X-API-Key")] string? xApiKey,
+            [FromHeader(Name = "Authorization")] string? authHeader,
+            HttpContext ctx,
+            IApplicationRegistryService registryService,
+            IToolCatalog toolCatalog,
+            ICallerQuota quota,
+            CancellationToken ct) =>
+        {
+            var apiKey = ExtractApiKey(xApiKey, authHeader);
+            var (isValid, appConfig, caller) = await registryService.AuthenticateAppAsync(appId, apiKey, ct);
+
+            if (!isValid || appConfig == null)
+            {
+                return Results.Json(new
+                {
+                    error = "UNAUTHORIZED",
+                    message = "Invalid, expired, or missing API key / STS token for this application."
+                }, statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            if (!SecurityService.ScopePermits(caller?.Scope, GatewayScopes.ToolsExecute))
+            {
+                return Results.Json(new
+                {
+                    error = "SCOPE_INSUFFICIENT",
+                    message = $"This credential does not carry the '{GatewayScopes.ToolsExecute}' scope. " +
+                              "Mint a token with it to call tools."
+                }, statusCode: StatusCodes.Status403Forbidden);
+            }
+
+            if (!quota.TryAcquireInvocation(appConfig.AppId))
+            {
+                return QuotaExceeded(ctx);
+            }
+
+            try
+            {
+                var result = await toolCatalog.ExecuteAsync(appConfig, tool, arguments, ct);
+
+                await registryService.RecordManagementActionAsync(
+                    ToolAudit(caller, ctx, appId, tool, arguments, success: !result.IsError,
+                        $"sideEffect={result.SideEffect}; guardrail={result.GuardrailAction}; {result.LatencyMs}ms"), ct);
+
+                return Results.Ok(result);
+            }
+            catch (ToolRefusedException ex)
+            {
+                await registryService.RecordManagementActionAsync(
+                    ToolAudit(caller, ctx, appId, tool, arguments, success: false, ex.Message), ct);
+
+                return Results.Json(new { error = "TOOL_REFUSED", message = ex.Message },
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+        })
+        .WithName("ExecuteTool")
+        .WithSummary("Call a tool attached to this application")
+        .Produces<ToolCallResult>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status401Unauthorized)
+        .Produces(StatusCodes.Status403Forbidden)
         .RequireRateLimiting("per-app");
 
         // Unauthenticated liveness only. Anything that reveals backend topology, role ARNs
@@ -261,8 +338,46 @@ public static class GatewayEndpoints
     }
 
 
+    /// <summary>
+    /// Quota identity for the universal endpoint (SEC-03).
+    ///
+    /// <see cref="CallerContext.Actor"/> carries the minter's chosen callerId as a label, so keying
+    /// a quota on it lets one principal split its own quota by relabelling its tokens. Both
+    /// credentials this endpoint accepts -- an admin STS token and the master key -- act as the
+    /// configured break-glass principal, so that is the identity the quota follows.
+    /// </summary>
+    public static string UniversalQuotaIdentity(string? breakGlassPrincipalArn) =>
+        "universal:" + (string.IsNullOrWhiteSpace(breakGlassPrincipalArn)
+            ? "break-glass"
+            : breakGlassPrincipalArn.Trim());
+
+    /// <summary>
+    /// An audit record for one tool call. The arguments are hashed rather than recorded: they are
+    /// caller content and can carry anything, but a hash still ties an approval, a result and a
+    /// complaint to the same call.
+    /// </summary>
+    private static ManagementAuditEntry ToolAudit(
+        CallerContext? caller, HttpContext ctx, string appId, string tool, JsonElement arguments,
+        bool success, string? detail)
+    {
+        var raw = arguments.ValueKind == JsonValueKind.Undefined ? "{}" : arguments.GetRawText();
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)))[..16].ToLowerInvariant();
+
+        return new ManagementAuditEntry
+        {
+            Action = "ExecuteTool",
+            Resource = $"{appId}/{tool}",
+            Actor = caller?.Actor,
+            AuthType = caller?.AuthType,
+            TokenId = caller?.TokenId,
+            SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+            Success = success,
+            Detail = $"args={hash}; {detail}"
+        };
+    }
+
     /// <summary>The same 429 the pre-authentication limiters return, for a spent per-application quota.</summary>
-    private static IResult QuotaExceeded(HttpContext ctx)
+    internal static IResult QuotaExceeded(HttpContext ctx)
     {
         ctx.Response.Headers.RetryAfter = "60";
         return Results.Json(new
@@ -314,6 +429,7 @@ public static class GatewayEndpoints
             "ALL_PROVIDERS_FAILED" => StatusCodes.Status502BadGateway,
             "LOCAL_ENDPOINT_TIMEOUT" => StatusCodes.Status504GatewayTimeout,
             "LOCAL_ENDPOINT_UNAVAILABLE" => StatusCodes.Status502BadGateway,
+            "LOCAL_BACKEND_DISABLED" => StatusCodes.Status502BadGateway,
             _ => StatusCodes.Status500InternalServerError
         };
 

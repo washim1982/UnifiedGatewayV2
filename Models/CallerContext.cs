@@ -19,6 +19,13 @@ public record CallerContext
     /// <summary>jti of the STS token presented, when one was.</summary>
     public string? TokenId { get; init; }
 
+    /// <summary>
+    /// Scope the credential carries. An STS token carries what it was minted with; the
+    /// application's own long-term key carries everything the application can do, since its
+    /// holder can mint any of those tokens anyway.
+    /// </summary>
+    public string? Scope { get; init; }
+
     /// <summary>Source address as the gateway saw it.</summary>
     public string? SourceIp { get; init; }
 

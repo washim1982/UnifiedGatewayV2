@@ -12,6 +12,68 @@ public class GatewayOptions
     public SecurityOptions Security { get; set; } = new();
     public StorageOptions Storage { get; set; } = new();
     public GuardrailOptions Guardrails { get; set; } = new();
+
+    /// <summary>Development-only: run the local AWS simulator alongside the gateway.</summary>
+    public DevSimulatorOptions DevSimulator { get; set; } = new();
+
+    /// <summary>Limits applied to every registered MCP server.</summary>
+    public McpOptions Mcp { get; set; } = new();
+}
+
+/// <summary>
+/// How the gateway talks to MCP servers. Registering one is an operator action, because its tools
+/// run with the rights the server itself has; these are the limits that apply to all of them.
+/// </summary>
+public class McpOptions
+{
+    /// <summary>
+    /// Host patterns a registered server may use ("mcp.example.com", "*.corp.internal"). Empty
+    /// allows any host that passes the transport rules: HTTPS outside Development, and never a
+    /// link-local or metadata address.
+    /// </summary>
+    public string[] AllowedHosts { get; set; } = [];
+
+    /// <summary>How long a server's published tool list is reused before being fetched again.</summary>
+    public int ToolCacheSeconds { get; set; } = 120;
+
+    /// <summary>Largest tool result the gateway will read. A longer one is refused, not truncated.</summary>
+    public int MaxOutputBytes { get; set; } = 262_144;
+
+    /// <summary>Largest argument payload the gateway will send to a tool.</summary>
+    public int MaxArgumentBytes { get; set; } = 32_768;
+}
+
+/// <summary>
+/// The local .NET AWS simulator (S3Local, KmsLocal, IamLocal) that Development runs the control
+/// plane against. When enabled, the gateway starts the three services as child processes at
+/// startup and stops them with itself, so one run brings up the whole development environment.
+///
+/// Development only: the simulator accepts a bare role name as proof of identity and auto-grants
+/// every role it is asked for. <see cref="UnifiedGateway.Startup.StartupValidator"/> refuses it
+/// anywhere else, and a Release build does not even compile it.
+/// </summary>
+public class DevSimulatorOptions
+{
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>Simulator sources, relative to the content root unless rooted.</summary>
+    public string ProjectDirectory { get; set; } = "dev/aws-simulator";
+
+    /// <summary>
+    /// Where the simulator keeps its SQLite databases, bucket files and key material, relative to
+    /// the content root unless rooted. Kept out of the simulator's own source tree so the
+    /// repository never carries dev key material or seeded databases.
+    /// </summary>
+    public string DataDirectory { get; set; } = "data/dev/simulator";
+
+    /// <summary>How long to wait for each service to answer /health before giving up on it.</summary>
+    public int StartupTimeoutSeconds { get; set; } = 40;
+
+    /// <summary>
+    /// True: a service already answering on its port is left alone and reused, so an externally
+    /// started simulator (run-simulator.ps1) still works. False: its port must be free.
+    /// </summary>
+    public bool ReuseRunning { get; set; } = true;
 }
 
 public class AwsOptions

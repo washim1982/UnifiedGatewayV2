@@ -494,3 +494,9 @@ data/
 
 # Roles Anywhere client certificate for local development. Never commit key material.
 certs/
+
+# Local AWS simulator runtime state: SQLite databases, bucket objects and dev key material.
+data/dev/simulator/
+dev/aws-simulator/**/bin/
+dev/aws-simulator/**/obj/
+dev/aws-simulator/**/.keys/

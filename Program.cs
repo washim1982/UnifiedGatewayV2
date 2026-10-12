@@ -13,6 +13,7 @@ using UnifiedGateway.Services.Cloud;
 using UnifiedGateway.Services.Cloud.Aws;
 using UnifiedGateway.Services.Cloud.LocalDotNet;
 using UnifiedGateway.Services.Cloud.Simulator;
+using UnifiedGateway.Services.Mcp;
 using UnifiedGateway.Services.Okta;
 using UnifiedGateway.Services.Telemetry;
 using UnifiedGateway.Startup;
@@ -175,7 +176,8 @@ builder.Services.AddSingleton(_ =>
 var retryPolicy = LocalProviderResilience.BuildRetryPolicy();
 var noRetryPolicy = Policy.NoOpAsync<HttpResponseMessage>();
 
-void AddLocalProviderClient(string name, string baseUrl, int timeoutSeconds, string apiKeySecretName)
+void AddLocalProviderClient(
+    string name, string backend, string baseUrl, int timeoutSeconds, bool enabled, string apiKeySecretName)
 {
     var circuitBreaker = LocalProviderResilience.BuildCircuitBreaker();
 
@@ -187,15 +189,24 @@ void AddLocalProviderClient(string name, string baseUrl, int timeoutSeconds, str
     .AddPolicyHandler(request =>
         LocalProviderResilience.IsRetryable(request) ? retryPolicy : noRetryPolicy)
     .AddPolicyHandler(circuitBreaker)
-    // Innermost, so a retried request carries the backend credential too (SEC-14).
+    // Innermost, so a retried request carries the backend credential too, and so a disabled
+    // backend is refused on every path that reaches it (SEC-14).
     .AddHttpMessageHandler(services =>
-        new LocalBackendAuthHandler(services.GetRequiredService<ISecretsProvider>(), apiKeySecretName));
+        new LocalBackendAuthHandler(
+            services.GetRequiredService<ISecretsProvider>(),
+            backend,
+            enabled,
+            apiKeySecretName,
+            enforceRemotePolicy: !builder.Environment.IsDevelopment()));
 }
 
 var localProviders = gatewayOptions.LocalProviders;
-AddLocalProviderClient("OllamaClient", localProviders.Ollama.BaseUrl, localProviders.Ollama.TimeoutSeconds, localProviders.Ollama.ApiKeySecretName);
-AddLocalProviderClient("LmStudioClient", localProviders.LmStudio.BaseUrl, localProviders.LmStudio.TimeoutSeconds, localProviders.LmStudio.ApiKeySecretName);
-AddLocalProviderClient("LlamaCppClient", localProviders.LlamaCpp.BaseUrl, localProviders.LlamaCpp.TimeoutSeconds, localProviders.LlamaCpp.ApiKeySecretName);
+AddLocalProviderClient("OllamaClient", "Ollama", localProviders.Ollama.BaseUrl,
+    localProviders.Ollama.TimeoutSeconds, localProviders.Ollama.Enabled, localProviders.Ollama.ApiKeySecretName);
+AddLocalProviderClient("LmStudioClient", "LmStudio", localProviders.LmStudio.BaseUrl,
+    localProviders.LmStudio.TimeoutSeconds, localProviders.LmStudio.Enabled, localProviders.LmStudio.ApiKeySecretName);
+AddLocalProviderClient("LlamaCppClient", "LlamaCpp", localProviders.LlamaCpp.BaseUrl,
+    localProviders.LlamaCpp.TimeoutSeconds, localProviders.LlamaCpp.Enabled, localProviders.LlamaCpp.ApiKeySecretName);
 
 // ---------------------------------------------------------------------------
 // 4. Core gateway services
@@ -229,8 +240,32 @@ builder.Services.AddSingleton<IBedrockService, BedrockService>();
 builder.Services.AddSingleton<ILocalModelService, LocalModelService>();
 builder.Services.AddSingleton<IAuditStore, S3AuditStore>();
 builder.Services.AddSingleton<IApplicationRegistryService, ApplicationRegistryService>();
+// Capabilities an application can be given. Skills today; tools, MCP servers, agents and plugins
+// bind through the same catalogue as they arrive.
+builder.Services.AddSingleton<ISkillRegistryService, SkillRegistryService>();
+builder.Services.AddSingleton<ICapabilityService, CapabilityService>();
+
+// The tool plane. MCP servers execute somewhere this gateway does not control, so their client
+// follows no redirects and keeps no cookies: the destination an operator registered is the only
+// one it talks to.
+builder.Services.AddSingleton<IMcpServerRegistry, McpServerRegistry>();
+builder.Services.AddSingleton<IMcpClient, McpClient>();
+builder.Services.AddSingleton<IToolCatalog, ToolCatalog>();
+builder.Services.AddHttpClient(McpClient.HttpClientName)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        UseCookies = false
+    });
 builder.Services.AddSingleton<IModelRouter, ModelRouter>();
 builder.Services.AddSingleton<IBillingService, BillingService>();
+
+// Development only: bring the local AWS simulator up with the gateway. Registered before the
+// services that call it, because hosted services start in registration order.
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services.AddHostedService<LocalAwsSimulatorHost>();
+}
 
 builder.Services.AddHostedService<AwsCredentialBackgroundService>();
 builder.Services.AddHostedService<CloudBootstrapService>();
@@ -485,6 +520,7 @@ app.UseStaticFiles(new StaticFileOptions
 // ---------------------------------------------------------------------------
 app.MapGatewayEndpoints();
 app.MapDashboardEndpoints();
+app.MapCapabilityEndpoints();
 
 // The simulator signs admin tokens for a directory compiled into the binary, so it is
 // Development-only twice over: StartupValidator refuses it elsewhere, and it is not mapped.

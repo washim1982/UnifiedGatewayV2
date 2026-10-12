@@ -70,6 +70,15 @@ public record AppConfig
 
     [JsonPropertyName("versionHistory")]
     public List<AppConfigSnapshot> VersionHistory { get; init; } = [];
+
+    /// <summary>
+    /// Capabilities attached to this application: skills now, tools, MCP servers, agents and
+    /// plugins as those catalogues arrive. Each binding pins a version, and holds no capability
+    /// content of its own -- the catalogue owns that, so one edit does not have to be applied to
+    /// every application that uses it.
+    /// </summary>
+    [JsonPropertyName("capabilities")]
+    public List<CapabilityBinding> Capabilities { get; init; } = [];
 }
 
 public record AppConfigSnapshot

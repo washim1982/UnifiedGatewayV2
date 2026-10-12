@@ -57,6 +57,18 @@
 | Remaining original findings | Unchanged implementation paths were rechecked against the previous assessment. No new live AWS, Okta, IIS, network, storage-outage or multi-worker test was performed. |
 | Review changes | Only this report was updated. No production fix or permanent regression test was added by this re-review. |
 
+## Follow-up fixes — 2026-10-10
+
+These supersede the SEC-03 and SEC-14 dispositions recorded in the re-review above. The suite now runs **337 passed, 0 failed** (331 before).
+
+| Residual gap | Change | Regression tests |
+| --- | --- | --- |
+| **SEC-14 P1** — disabled remote backend still callable in clear with no credential | `Enabled` is now a dispatch restriction. [LocalModelService](../Services/LocalModelService.cs) refuses invocation with `LOCAL_BACKEND_DISABLED` before any HTTP call, and discovery and health probes skip disabled backends instead of contacting them (discovery no longer offers default model names when every backend is disabled). [LocalBackendAuthHandler](../Startup/LocalBackendAuthHandler.cs) refuses every request to a disabled backend, and outside Development also refuses a remote backend that is not HTTPS or that names no credential. Startup validation still skips disabled backends, which is now safe because nothing can reach them. | `SEC14_ADisabledBackendIsNeverInvoked`, `SEC14_DiscoveryAndProbesDoNotContactDisabledBackends`, `SEC14_TheHandlerRefusesEveryRequestToADisabledBackend`, `SEC14_ARemoteBackendWithNoCredentialIsRefusedOutsideDevelopment`, `SEC14_DevelopmentMayStillUseAPlainHttpBackendOnTheBench` |
+| **SEC-03 P2** — universal quota key fragmented by the caller-chosen `CallerId` | The universal endpoint now keys its quota on [`GatewayEndpoints.UniversalQuotaIdentity`](../Endpoints/GatewayEndpoints.cs), derived from the configured break-glass principal, rather than on `CallerContext.Actor`. `CallerId` remains an audit label only. | `SEC03_TheUniversalQuotaIgnoresTheCallerChosenTokenLabel` |
+| **SEC-03 completeness** — management routes bypassed the application quota | The management test route consumes the application's invocation quota and the management mint route its issuance quota ([DashboardEndpoints](../Endpoints/DashboardEndpoints.cs)), returning the same 429 as the data plane. | Source-verified only; see the limitation below. |
+
+**Limitation.** This suite has no in-process web host, so the quota wiring on the two management routes, the `LOCAL_BACKEND_DISABLED` status mapping and the 400 for native Bedrock guardrails are verified by source and by unit tests of the components, not through a live endpoint. An integration host remains the honest next step for all three.
+
 ## Original findings — historical evidence from 2026-09-14
 
 This table records what the first review found. **It does not describe the current state of findings now marked Fixed or Mitigated above.** Its original line anchors can have shifted; use the re-review section for current remediation evidence.
