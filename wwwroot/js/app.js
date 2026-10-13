@@ -485,9 +485,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!res.ok) return;
       providerKinds = await res.json();
 
+      // Keyed by preset id, not by kind: LM Studio, llama.cpp, vLLM and Groq are all the same
+      // OpenAI-compatible adapter, and an operator adding LM Studio should not need to know that.
       const select = document.getElementById('provider-kind');
       select.innerHTML = providerKinds
-        .map(k => `<option value="${escapeHtml(k.kind)}">${escapeHtml(k.label)}</option>`)
+        .map(k => `<option value="${escapeHtml(k.id)}">${escapeHtml(k.label)}</option>`)
         .join('');
 
       applyProviderKind();
@@ -496,22 +498,32 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function selectedPreset() {
+    return providerKinds.find(k => k.id === document.getElementById('provider-kind').value);
+  }
+
   function applyProviderKind() {
-    const select = document.getElementById('provider-kind');
-    const kind = providerKinds.find(k => k.kind === select.value);
-    if (!kind) return;
+    const preset = selectedPreset();
+    if (!preset) return;
 
     const baseUrl = document.getElementById('provider-base-url');
     const apiKey = document.getElementById('provider-api-key');
+    const providerId = document.getElementById('provider-id');
 
-    baseUrl.value = kind.defaultBaseUrl || '';
-    baseUrl.disabled = kind.kind === 'Bedrock';
-    apiKey.disabled = !kind.needsKey;
-    apiKey.placeholder = kind.needsKey
+    baseUrl.value = preset.defaultBaseUrl || '';
+    baseUrl.disabled = preset.kind === 'Bedrock';
+    apiKey.disabled = !preset.needsKey;
+    apiKey.placeholder = preset.needsKey
       ? 'Stored in the secret store, never displayed again'
       : 'Not required for this provider';
 
-    document.getElementById('provider-kind-note').textContent = kind.note || '';
+    // Only suggest an id while the operator has not typed their own.
+    if (!providerId.value || providerId.dataset.suggested === 'true') {
+      providerId.value = preset.suggestedId || '';
+      providerId.dataset.suggested = 'true';
+    }
+
+    document.getElementById('provider-kind-note').textContent = preset.note || '';
   }
 
   async function loadProviders() {
@@ -547,6 +559,7 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
           <div class="app-card-actions">
             <button class="btn btn-sm btn-outline" data-provider-test="${escapeHtml(p.providerId)}">Test</button>
+            ${p.kind === 'OpenAiCompatible' ? `<button class="btn btn-sm btn-outline" data-provider-models="${escapeHtml(p.providerId)}">Discover models</button>` : ''}
             <button class="btn btn-sm btn-outline" data-provider-toggle="${escapeHtml(p.providerId)}" data-active="${p.isActive}">
               ${p.isActive ? 'Disable' : 'Enable'}
             </button>
@@ -556,6 +569,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       list.querySelectorAll('[data-provider-test]').forEach(btn =>
         btn.addEventListener('click', () => testProvider(btn.dataset.providerTest, btn)));
+
+      list.querySelectorAll('[data-provider-models]').forEach(btn =>
+        btn.addEventListener('click', () => discoverProviderModels(btn.dataset.providerModels, btn)));
 
       list.querySelectorAll('[data-provider-toggle]').forEach(btn =>
         btn.addEventListener('click', () => updateProvider(btn.dataset.providerToggle, { isActive: btn.dataset.active !== 'true' })));
@@ -573,10 +589,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const models = document.getElementById('provider-models').value
       .split(',').map(m => m.trim()).filter(Boolean);
 
+    const preset = selectedPreset();
     const payload = {
       providerId: document.getElementById('provider-id').value.trim(),
-      name: document.getElementById('provider-name').value.trim(),
-      kind: document.getElementById('provider-kind').value,
+      name: document.getElementById('provider-name').value.trim() || preset?.label || '',
+      kind: preset?.kind,
       baseUrl: document.getElementById('provider-base-url').value.trim(),
       apiKey: document.getElementById('provider-api-key').value,
       models,
@@ -591,6 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (res.ok) {
       document.getElementById('provider-form').reset();
+      document.getElementById('provider-id').dataset.suggested = 'true';
       applyProviderKind();
       await loadProviders();
       return;
@@ -626,6 +644,30 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     await loadProviders();
+  }
+
+  /// Asks an OpenAI-compatible server what it is currently serving and stores the answer, which
+  /// is how a local server's list keeps up as models are loaded and unloaded.
+  async function discoverProviderModels(providerId, button) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Asking...';
+
+    try {
+      const res = await apiFetch(`/api/providers/${encodeURIComponent(providerId)}/models`);
+      const result = await res.json().catch(() => ({}));
+
+      if (!res.ok || !result.discovered) {
+        alert(`${providerId} did not answer with a model list. ${result.error || ''}`.trim());
+        return;
+      }
+
+      await updateProvider(providerId, { models: result.models, defaultModel: result.models[0] || null });
+      alert(`${providerId} is serving: ${result.models.join(', ') || 'nothing'}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
   }
 
   async function testProvider(providerId, button) {
