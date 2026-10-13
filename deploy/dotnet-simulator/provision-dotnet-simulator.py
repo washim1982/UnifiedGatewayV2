@@ -82,6 +82,10 @@ ROLES = [
                          # Read the MCP catalogue to choose tools to attach; registering a
                          # server stays with the platform admin, since its tools execute.
                          "gateway:ReadMcpServers",
+                         # Read the provider catalogue to route an application; configuring a
+                         # provider decides where prompts go and who is billed, so it stays
+                         # with the platform admin.
+                         "gateway:ReadProviders",
                      ],
                      "resource": ["*"]},
                     {"sid": "DenyPolicyAndKeyControl", "effect": "Deny",
@@ -89,6 +93,7 @@ ROLES = [
                          "gateway:UpdateGuardrailConfig", "gateway:RotateSigningKey",
                          "gateway:DeleteApplication", "gateway:ReadBilling",
                          "gateway:ManageMcpServers", "gateway:ManagePlugins",
+                         "gateway:ManageProviders",
                      ],
                      "resource": ["*"]},
                     {"sid": "SimulatorServices", "effect": "Allow",

@@ -254,6 +254,9 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (tab === 'skills') {
         loadSkills();
         loadCapabilityApps();
+      } else if (tab === 'providers') {
+        loadProviderKinds();
+        loadProviders();
       }
     });
   });
@@ -267,6 +270,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const titles = {
       apps: { title: 'Application Registry', sub: 'Manage per-application AI routing endpoints and system prompts' },
       skills: { title: 'Skills & Capabilities', sub: 'Instruction sets an application can be given, and what is attached to each one' },
+      providers: { title: 'Model Providers', sub: 'OpenAI, Anthropic, Gemini, Ollama hosts, OpenAI-compatible servers and Bedrock' },
       guardrails: { title: 'Guardrails & Data Safety', sub: 'Admin-level PCI, PII, Secrets, and Prompt Injection policies for all requests' },
       generator: { title: 'API Generator & Test Console', sub: 'Generated REST endpoints with sample SDK code and interactive sandbox' },
       universal: { title: 'Universal Router', sub: 'Direct normalized schema invocation across Bedrock and Local engines' },
@@ -446,6 +450,206 @@ document.addEventListener('DOMContentLoaded', () => {
       btnRunGrTest.textContent = 'Analyze & Sanitize';
     }
   });
+
+  // --- Model providers ---------------------------------------------------------
+  // The key is write-only: it goes to the secret store on save and is never returned, so the
+  // list shows only which key is in place, by its last four characters.
+  let providerKinds = [];
+  let registeredProviders = [];
+
+  /// Registered providers become routing choices when an application is created, beside the
+  /// built-in bedrock and local names.
+  function syncAppProviderOptions() {
+    const select = document.getElementById('modal-app-provider');
+    if (!select) return;
+
+    const current = select.value;
+    select.querySelectorAll('option[data-registered]').forEach(o => o.remove());
+
+    registeredProviders.filter(p => p.isActive).forEach(p => {
+      const option = document.createElement('option');
+      option.value = p.providerId;
+      option.textContent = `${p.name} (${p.providerId})`;
+      option.dataset.registered = 'true';
+      select.appendChild(option);
+    });
+
+    if (current) select.value = current;
+  }
+
+  async function loadProviderKinds() {
+    if (providerKinds.length) return;
+
+    try {
+      const res = await apiFetch('/api/providers/kinds');
+      if (!res.ok) return;
+      providerKinds = await res.json();
+
+      const select = document.getElementById('provider-kind');
+      select.innerHTML = providerKinds
+        .map(k => `<option value="${escapeHtml(k.kind)}">${escapeHtml(k.label)}</option>`)
+        .join('');
+
+      applyProviderKind();
+    } catch (err) {
+      console.error('Could not load provider kinds', err);
+    }
+  }
+
+  function applyProviderKind() {
+    const select = document.getElementById('provider-kind');
+    const kind = providerKinds.find(k => k.kind === select.value);
+    if (!kind) return;
+
+    const baseUrl = document.getElementById('provider-base-url');
+    const apiKey = document.getElementById('provider-api-key');
+
+    baseUrl.value = kind.defaultBaseUrl || '';
+    baseUrl.disabled = kind.kind === 'Bedrock';
+    apiKey.disabled = !kind.needsKey;
+    apiKey.placeholder = kind.needsKey
+      ? 'Stored in the secret store, never displayed again'
+      : 'Not required for this provider';
+
+    document.getElementById('provider-kind-note').textContent = kind.note || '';
+  }
+
+  async function loadProviders() {
+    const list = document.getElementById('providers-list');
+    try {
+      const res = await apiFetch('/api/providers');
+      if (!res.ok) {
+        list.innerHTML = '<p class="placeholder-text">Providers could not be loaded. Your role may not permit it.</p>';
+        return;
+      }
+
+      const providers = await res.json();
+      registeredProviders = providers;
+      syncAppProviderOptions();
+
+      if (!providers.length) {
+        list.innerHTML = '<p class="placeholder-text">No providers configured yet.</p>';
+        return;
+      }
+
+      list.innerHTML = providers.map(p => `
+        <div class="app-meta-row">
+          <div>
+            <strong>${escapeHtml(p.name)}</strong>
+            <span class="app-id-badge">${escapeHtml(p.providerId)}</span>
+            <span class="badge">${escapeHtml(p.kind)}</span>
+            ${p.isActive ? '' : '<span class="badge">disabled</span>'}
+            <div class="app-desc">
+              ${escapeHtml(p.baseUrl || 'AWS regional endpoint')}
+              ${p.apiKeyHint ? ` &middot; key ····${escapeHtml(p.apiKeyHint)}` : ' &middot; no key'}
+              ${p.defaultModel ? ` &middot; default ${escapeHtml(p.defaultModel)}` : ''}
+            </div>
+          </div>
+          <div class="app-card-actions">
+            <button class="btn btn-sm btn-outline" data-provider-test="${escapeHtml(p.providerId)}">Test</button>
+            <button class="btn btn-sm btn-outline" data-provider-toggle="${escapeHtml(p.providerId)}" data-active="${p.isActive}">
+              ${p.isActive ? 'Disable' : 'Enable'}
+            </button>
+            <button class="btn btn-sm btn-danger" data-provider-delete="${escapeHtml(p.providerId)}">Delete</button>
+          </div>
+        </div>`).join('');
+
+      list.querySelectorAll('[data-provider-test]').forEach(btn =>
+        btn.addEventListener('click', () => testProvider(btn.dataset.providerTest, btn)));
+
+      list.querySelectorAll('[data-provider-toggle]').forEach(btn =>
+        btn.addEventListener('click', () => updateProvider(btn.dataset.providerToggle, { isActive: btn.dataset.active !== 'true' })));
+
+      list.querySelectorAll('[data-provider-delete]').forEach(btn =>
+        btn.addEventListener('click', () => deleteProvider(btn.dataset.providerDelete)));
+    } catch (err) {
+      list.innerHTML = '<p class="placeholder-text">Providers could not be loaded.</p>';
+    }
+  }
+
+  async function createProvider(event) {
+    event.preventDefault();
+
+    const models = document.getElementById('provider-models').value
+      .split(',').map(m => m.trim()).filter(Boolean);
+
+    const payload = {
+      providerId: document.getElementById('provider-id').value.trim(),
+      name: document.getElementById('provider-name').value.trim(),
+      kind: document.getElementById('provider-kind').value,
+      baseUrl: document.getElementById('provider-base-url').value.trim(),
+      apiKey: document.getElementById('provider-api-key').value,
+      models,
+      defaultModel: document.getElementById('provider-default-model').value.trim() || models[0] || null
+    };
+
+    const res = await apiFetch('/api/providers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.ok) {
+      document.getElementById('provider-form').reset();
+      applyProviderKind();
+      await loadProviders();
+      return;
+    }
+
+    const problem = await res.json().catch(() => ({}));
+    alert(problem.error || 'The provider was refused.');
+  }
+
+  async function updateProvider(providerId, changes) {
+    const res = await apiFetch(`/api/providers/${encodeURIComponent(providerId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes)
+    });
+
+    if (!res.ok) {
+      const problem = await res.json().catch(() => ({}));
+      alert(problem.error || 'The provider could not be updated.');
+      return;
+    }
+    await loadProviders();
+  }
+
+  async function deleteProvider(providerId) {
+    if (!confirm(`Delete provider "${providerId}"? Applications routed to it will fail until they are repointed.`)) {
+      return;
+    }
+
+    const res = await apiFetch(`/api/providers/${encodeURIComponent(providerId)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      alert('The provider could not be deleted.');
+      return;
+    }
+    await loadProviders();
+  }
+
+  async function testProvider(providerId, button) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Testing...';
+
+    try {
+      const res = await apiFetch(`/api/providers/${encodeURIComponent(providerId)}/test`, { method: 'POST' });
+      const result = await res.json().catch(() => ({}));
+
+      if (res.ok && result.ok) {
+        alert(`${providerId} answered in ${result.latencyMs} ms using ${result.model}.`);
+      } else {
+        alert(`${providerId} failed: ${result.error?.message || result.error || 'no response'}`);
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+
+  document.getElementById('provider-form').addEventListener('submit', createProvider);
+  document.getElementById('provider-kind').addEventListener('change', applyProviderKind);
 
   // --- Skills & capabilities ---------------------------------------------------
   // The catalogue is separate from the bindings: a skill is registered once and attached to as
@@ -665,7 +869,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const modalModelSelect = document.getElementById('modal-app-model');
     modalModelSelect.innerHTML = '';
 
-    const models = modalProvider === 'bedrock' ? availableModels.bedrock : availableModels.local;
+    // A registered provider carries its own model list; the built-in names fall back to what
+    // the gateway discovered.
+    const registered = registeredProviders.find(p => p.providerId === modalProvider);
+    const models = registered
+      ? registered.models
+      : (modalProvider === 'bedrock' ? availableModels.bedrock : availableModels.local);
+
     models.forEach(m => {
       const opt = document.createElement('option');
       opt.value = typeof m === 'string' ? m : m.id;
@@ -2181,6 +2391,7 @@ Write-Output $response.output`;
 
   loadStsStatus();
   loadModels();
+  loadProviders();
   loadApps();
   loadGuardrailConfig();
 });

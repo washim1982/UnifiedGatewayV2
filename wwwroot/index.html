@@ -70,6 +70,10 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           Skills & Capabilities
         </button>
+        <button class="nav-btn" data-tab="providers" data-requires-admin>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          Model Providers
+        </button>
         <button class="nav-btn" data-tab="guardrails" data-requires-admin>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Guardrails & Safety
@@ -200,6 +204,68 @@
           </div>
           <div id="cap-list" class="factlist">
             <p class="placeholder-text">Choose an application.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Model Providers -->
+      <section class="tab-pane" id="pane-providers">
+        <div class="generator-layout">
+          <div class="panel">
+            <div class="panel-head">
+              <span class="panel-title">Configured providers</span>
+            </div>
+            <p class="panel-note">
+              Where this gateway sends prompts. An API key entered here is written to the secret store
+              and never shown again &mdash; only its last four characters are kept, so you can tell which
+              key is in place without being able to read it back.
+            </p>
+            <div id="providers-list" class="factlist">
+              <p class="placeholder-text">Loading providers...</p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <span class="panel-title">Add a provider</span>
+            </div>
+            <form id="provider-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label>PROVIDER ID</label>
+                  <input class="form-control" id="provider-id" placeholder="openai" required>
+                </div>
+                <div class="form-group">
+                  <label>DISPLAY NAME</label>
+                  <input class="form-control" id="provider-name" placeholder="OpenAI">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>PROVIDER TYPE</label>
+                <select id="provider-kind" class="form-control"></select>
+                <small class="panel-note" id="provider-kind-note"></small>
+              </div>
+              <div class="form-group">
+                <label>BASE URL</label>
+                <input class="form-control" id="provider-base-url" placeholder="https://api.openai.com">
+              </div>
+              <div class="form-group">
+                <label>API KEY</label>
+                <input type="password" class="form-control" id="provider-api-key" placeholder="Stored in the secret store, never displayed again"
+                       autocomplete="new-password">
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>MODELS (COMMA SEPARATED)</label>
+                  <input class="form-control" id="provider-models" placeholder="gpt-4o, gpt-4o-mini">
+                </div>
+                <div class="form-group">
+                  <label>DEFAULT MODEL</label>
+                  <input class="form-control" id="provider-default-model" placeholder="gpt-4o">
+                </div>
+              </div>
+              <button type="submit" class="btn btn-primary" data-requires-admin>Add provider</button>
+            </form>
           </div>
         </div>
       </section>

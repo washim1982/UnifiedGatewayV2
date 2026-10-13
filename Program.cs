@@ -14,6 +14,7 @@ using UnifiedGateway.Services.Cloud.Aws;
 using UnifiedGateway.Services.Cloud.LocalDotNet;
 using UnifiedGateway.Services.Cloud.Simulator;
 using UnifiedGateway.Services.Mcp;
+using UnifiedGateway.Services.Providers;
 using UnifiedGateway.Services.Okta;
 using UnifiedGateway.Services.Telemetry;
 using UnifiedGateway.Startup;
@@ -248,6 +249,21 @@ builder.Services.AddSingleton<ICapabilityService, CapabilityService>();
 // The tool plane. MCP servers execute somewhere this gateway does not control, so their client
 // follows no redirects and keeps no cookies: the destination an operator registered is the only
 // one it talks to.
+// Model providers an operator configures at runtime: OpenAI, Anthropic, Gemini, an Ollama host,
+// anything OpenAI-compatible, and Bedrock. Keys live in the secret store, not in the registry.
+builder.Services.AddSingleton<IProviderRegistry, ProviderRegistry>();
+builder.Services.AddSingleton<IProviderDispatcher, ProviderDispatcher>();
+builder.Services.AddSingleton<IProviderAdapter, OpenAiCompatibleAdapter>();
+builder.Services.AddSingleton<IProviderAdapter, AnthropicAdapter>();
+builder.Services.AddSingleton<IProviderAdapter, GeminiAdapter>();
+builder.Services.AddSingleton<IProviderAdapter, OllamaAdapter>();
+builder.Services.AddHttpClient(HttpProviderAdapter.HttpClientName)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        UseCookies = false
+    });
+
 builder.Services.AddSingleton<IMcpServerRegistry, McpServerRegistry>();
 builder.Services.AddSingleton<IMcpClient, McpClient>();
 builder.Services.AddSingleton<IToolCatalog, ToolCatalog>();
@@ -521,6 +537,7 @@ app.UseStaticFiles(new StaticFileOptions
 app.MapGatewayEndpoints();
 app.MapDashboardEndpoints();
 app.MapCapabilityEndpoints();
+app.MapProviderEndpoints();
 
 // The simulator signs admin tokens for a directory compiled into the binary, so it is
 // Development-only twice over: StartupValidator refuses it elsewhere, and it is not mapped.

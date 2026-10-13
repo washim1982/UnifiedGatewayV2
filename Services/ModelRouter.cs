@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using UnifiedGateway.Models;
 using UnifiedGateway.Services.Mcp;
+using UnifiedGateway.Services.Providers;
 
 namespace UnifiedGateway.Services;
 
@@ -15,6 +16,7 @@ public class ModelRouter : IModelRouter
     private readonly ICapabilityService? _capabilityService;
     private readonly IToolCatalog? _toolCatalog;
     private readonly ICallerQuota? _quota;
+    private readonly IProviderDispatcher? _providerDispatcher;
     private readonly GatewayOptions _options;
     private readonly ILogger<ModelRouter> _logger;
 
@@ -31,10 +33,12 @@ public class ModelRouter : IModelRouter
         ILogger<ModelRouter> logger,
         ICapabilityService? capabilityService = null,
         IToolCatalog? toolCatalog = null,
-        ICallerQuota? quota = null)
+        ICallerQuota? quota = null,
+        IProviderDispatcher? providerDispatcher = null)
     {
         _toolCatalog = toolCatalog;
         _quota = quota;
+        _providerDispatcher = providerDispatcher;
         _bedrockService = bedrockService;
         _localModelService = localModelService;
         _registryService = registryService;
@@ -478,11 +482,48 @@ public class ModelRouter : IModelRouter
         UniversalRequest request,
         CancellationToken cancellationToken)
     {
+        // A provider an operator registered wins: its id is what applications route to, and it
+        // may well be "openai" or "gemini" rather than one of the built-in names.
+        if (_providerDispatcher is not null)
+        {
+            var registered = await _providerDispatcher.TryInvokeAsync(provider, request, cancellationToken);
+            if (registered is not null)
+            {
+                return registered;
+            }
+        }
+
         return provider.ToLowerInvariant() switch
         {
             "bedrock" or "aws" => await _bedrockService.InvokeModelAsync(request, cancellationToken),
             "local" or "ollama" or "lmstudio" or "llamacpp" => await _localModelService.InvokeLocalModelAsync(request, cancellationToken),
-            _ => await _bedrockService.InvokeModelAsync(request, cancellationToken)
+
+            // Neither registered nor a built-in name. Refusing is the point: a typo used to send
+            // a local workload to Bedrock, across a data-residency boundary and onto a bill
+            // (SEC-09).
+            _ => UnknownProvider(provider, request)
+        };
+    }
+
+    private UniversalResponse UnknownProvider(string provider, UniversalRequest request)
+    {
+        _logger.LogWarning(
+            "Application '{AppId}' names provider '{Provider}', which is not registered.",
+            request.Metadata?.AppId ?? "direct", provider);
+
+        return new UniversalResponse
+        {
+            Output = string.Empty,
+            Model = request.Model,
+            Provider = provider,
+            AppId = request.Metadata?.AppId,
+            SessionId = request.Metadata?.SessionId,
+            Error = new GatewayError
+            {
+                Code = "UNKNOWN_PROVIDER",
+                Message = $"No provider named '{provider}' is registered.",
+                Details = "Register it under Providers, or route the application to an existing one."
+            }
         };
     }
 
